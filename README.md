@@ -11,6 +11,7 @@ App nativo para visualizar malhas e nuvens de pontos `.stl` e `.ply` no celular.
 - Plano de corte em X, Y ou Z
 - Alinhamento XYZ: automático, por face plana, por aresta, giro fino e definição de origem; exporta a malha alinhada
 - Análise: malha fechada ou aberta, bordas e furos em vermelho, ilhas, área, volume e massa estimada por material
+- Comparação scan × CAD: alinhamento automático (eixos principais + ICP) ou refino, mapa de cores de desvio com tolerância ajustável, estatísticas e desvio por ponto
 - Versão leve automática para girar malhas grandes com fluidez
 - Modo apresentação com giro automático
 - Foto da tela com rodapé e envio de STL por WhatsApp

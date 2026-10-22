@@ -66,6 +66,7 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
             "uniform int uLit;\n" +
             "uniform int uClipOn;\n" +
             "uniform vec4 uClip;\n" +
+            "uniform float uAlpha;\n" +
             "out vec4 fragColor;\n" +
             "void main(){\n" +
             "  if (uClipOn == 1 && dot(vec4(vPos, 1.0), uClip) > 0.0) discard;\n" +
@@ -76,11 +77,11 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
             "    float d = l > 1e-6 ? abs(vNormal.z / l) : 1.0;\n" +
             "    c = c * (0.22 + 0.78 * d) + vec3(0.18) * pow(d, 32.0);\n" +
             "  }\n" +
-            "  fragColor = vec4(c, 1.0);\n" +
+            "  fragColor = vec4(c, uAlpha);\n" +
             "}\n";
 
     private int program;
-    private int uMVP, uMV, uPointSize, uLit, uClipOn, uClip;
+    private int uMVP, uMV, uPointSize, uLit, uClipOn, uClip, uAlpha;
 
     /** Buffers de GPU de uma malha: 0 posição, 1 normal, 2 cor, 3 índices, mais arestas do modo arame. */
     private static final class Gpu {
@@ -103,6 +104,10 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
 
     private final Gpu gpuFull = new Gpu();
     private final Gpu gpuLite = new Gpu();
+    private final Gpu gpuRef = new Gpu();
+    private Mesh ref;
+    private boolean refUploadPending = false;
+    private boolean showRef = true;
 
     private Mesh mesh;
     private Mesh lite;
@@ -163,6 +168,22 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
     synchronized void setLite(Mesh full, Mesh l) {
         if (full != mesh) return;
         lite = l;
+        liteUploadPending = true;
+    }
+
+    /** Malha de referência (CAD) desenhada translúcida sobre o scan. Null remove. */
+    synchronized void setReference(Mesh r) {
+        ref = r;
+        refUploadPending = true;
+    }
+
+    synchronized void setShowReference(boolean on) {
+        showRef = on;
+    }
+
+    /** Reenvia cores/vértices para a GPU sem mexer na câmera (mapa de desvios). */
+    synchronized void reupload() {
+        uploadPending = true;
         liteUploadPending = true;
     }
 
@@ -341,6 +362,7 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
         uLit = GLES30.glGetUniformLocation(program, "uLit");
         uClipOn = GLES30.glGetUniformLocation(program, "uClipOn");
         uClip = GLES30.glGetUniformLocation(program, "uClip");
+        uAlpha = GLES30.glGetUniformLocation(program, "uAlpha");
 
         GLES30.glEnable(GLES30.GL_DEPTH_TEST);
         GLES30.glDisable(GLES30.GL_CULL_FACE);
@@ -349,7 +371,9 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
         // contexto novo: buffers antigos não existem mais
         gpuFull.forget();
         gpuLite.forget();
+        gpuRef.forget();
         synchronized (this) {
+            if (ref != null) refUploadPending = true;
             if (mesh != null) uploadPending = true;
             if (lite != null) liteUploadPending = true;
         }
@@ -366,9 +390,9 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
 
     @Override
     public void onDrawFrame(GL10 unused) {
-        Mesh m, l;
+        Mesh m, l, r;
         int curMode;
-        boolean doUpload, doLite, useLite;
+        boolean doUpload, doLite, useLite, doRef, drawRef;
         float[] curClip;
         FloatBuffer oPts, oPtCol, oLines, oLineCol;
         int oPtN, oLineN;
@@ -380,6 +404,10 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
             uploadPending = false;
             doLite = liteUploadPending;
             liteUploadPending = false;
+            r = ref;
+            doRef = refUploadPending;
+            refUploadPending = false;
+            drawRef = showRef && r != null;
             if (spinning) {
                 long now = System.nanoTime();
                 if (lastSpinNs != 0) {
@@ -400,11 +428,16 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
             gpuLite.delete();
             if (l != null) upload(gpuLite, l);
         }
+        if (doRef) {
+            gpuRef.delete();
+            if (r != null) upload(gpuRef, r);
+        }
 
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT | GLES30.GL_DEPTH_BUFFER_BIT);
         if (m != null && gpuFull.vbo[0] != 0) {
             if (useLite && gpuLite.vbo[0] != 0) drawMesh(gpuLite, l, curMode, curClip);
             else drawMesh(gpuFull, m, curMode, curClip);
+            if (drawRef && gpuRef.vbo[0] != 0) drawGhost(gpuRef, r, curClip);
             drawOverlay(oPts, oPtCol, oPtN, oLines, oLineCol, oLineN);
         }
 
@@ -422,6 +455,7 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
 
         GLES30.glEnable(GLES30.GL_DEPTH_TEST);
         GLES30.glUseProgram(program);
+        GLES30.glUniform1f(uAlpha, 1f);
         GLES30.glUniformMatrix4fv(uMVP, 1, false, mvp, 0);
         GLES30.glUniformMatrix4fv(uMV, 1, false, mv, 0);
         GLES30.glUniform1f(uPointSize, pointSizePx);
@@ -473,6 +507,41 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
         }
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0);
         GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, 0);
+    }
+
+    /** Referência translúcida azul, sem escrever profundidade (o scan continua visível através dela). */
+    private void drawGhost(Gpu g, Mesh r, float[] curClip) {
+        if (r.pointCloud) return;
+        GLES30.glEnable(GLES30.GL_BLEND);
+        GLES30.glBlendFunc(GLES30.GL_SRC_ALPHA, GLES30.GL_ONE_MINUS_SRC_ALPHA);
+        GLES30.glDepthMask(false);
+        GLES30.glUniform1f(uAlpha, 0.28f);
+        GLES30.glUniform1i(uClipOn, curClip != null ? 1 : 0);
+        GLES30.glUniform1i(uLit, g.vbo[1] != 0 ? 1 : 0);
+        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, g.vbo[0]);
+        GLES30.glEnableVertexAttribArray(0);
+        GLES30.glVertexAttribPointer(0, 3, GLES30.GL_FLOAT, false, 0, 0);
+        if (g.vbo[1] != 0) {
+            GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, g.vbo[1]);
+            GLES30.glEnableVertexAttribArray(1);
+            GLES30.glVertexAttribPointer(1, 3, GLES30.GL_FLOAT, false, 0, 0);
+        } else {
+            GLES30.glDisableVertexAttribArray(1);
+            GLES30.glVertexAttrib3f(1, 0f, 0f, 1f);
+        }
+        GLES30.glDisableVertexAttribArray(2);
+        GLES30.glVertexAttrib3f(2, 0.35f, 0.62f, 1.0f);
+        if (g.vbo[3] != 0) {
+            GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, g.vbo[3]);
+            GLES30.glDrawElements(GLES30.GL_TRIANGLES, r.indices.length, GLES30.GL_UNSIGNED_INT, 0);
+        } else {
+            GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, r.vertexCount);
+        }
+        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0);
+        GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, 0);
+        GLES30.glDepthMask(true);
+        GLES30.glDisable(GLES30.GL_BLEND);
+        GLES30.glUniform1f(uAlpha, 1f);
     }
 
     /** Marcadores sempre visíveis (sem teste de profundidade), a partir de arrays do cliente. */

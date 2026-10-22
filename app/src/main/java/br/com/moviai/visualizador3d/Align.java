@@ -57,6 +57,89 @@ final class Align {
         return e;
     }
 
+    /** Autovetor do maior autovalor de matriz simétrica n×n (Jacobi). */
+    static double[] maxEigenvector(double[][] in) {
+        int n = in.length;
+        double[][] a = new double[n][];
+        for (int i = 0; i < n; i++) a[i] = in[i].clone();
+        double[][] v = new double[n][n];
+        for (int i = 0; i < n; i++) v[i][i] = 1;
+        for (int sweep = 0; sweep < 60; sweep++) {
+            double off = 0;
+            for (int p = 0; p < n; p++) for (int q = p + 1; q < n; q++) off += a[p][q] * a[p][q];
+            if (off < 1e-30) break;
+            for (int p = 0; p < n - 1; p++) {
+                for (int q = p + 1; q < n; q++) {
+                    if (Math.abs(a[p][q]) < 1e-300) continue;
+                    double theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+                    double t = theta == 0 ? 1 : Math.signum(theta) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+                    double c = 1 / Math.sqrt(t * t + 1), s = t * c;
+                    for (int k = 0; k < n; k++) {
+                        double akp = a[k][p], akq = a[k][q];
+                        a[k][p] = c * akp - s * akq;
+                        a[k][q] = s * akp + c * akq;
+                    }
+                    for (int k = 0; k < n; k++) {
+                        double apk = a[p][k], aqk = a[q][k];
+                        a[p][k] = c * apk - s * aqk;
+                        a[q][k] = s * apk + c * aqk;
+                    }
+                    for (int k = 0; k < n; k++) {
+                        double vkp = v[k][p], vkq = v[k][q];
+                        v[k][p] = c * vkp - s * vkq;
+                        v[k][q] = s * vkp + c * vkq;
+                    }
+                }
+            }
+        }
+        int best = 0;
+        for (int i = 1; i < n; i++) if (a[i][i] > a[best][best]) best = i;
+        double[] e = new double[n];
+        for (int k = 0; k < n; k++) e[k] = v[k][best];
+        return e;
+    }
+
+    /**
+     * Covariância da superfície (integral exata sobre os triângulos, ponderada pela área).
+     * Independe de como a malha foi triangulada: um CAD com poucos triângulos grandes
+     * e um scan denso da mesma peça dão o mesmo resultado. Nuvem de pontos usa os vértices.
+     */
+    static double[][] surfaceCovariance(Mesh m, double[] mean) {
+        int tris = MeshAnalysis.triCount(m);
+        if (tris == 0) return covariance(m, mean);
+        float[] p = m.positions;
+        double A = 0, gx = 0, gy = 0, gz = 0;
+        double xx = 0, yy = 0, zz = 0, xy = 0, xz = 0, yz = 0;
+        double ox = m.center[0], oy = m.center[1], oz = m.center[2];
+        for (int t = 0; t < tris; t++) {
+            int a = MeshAnalysis.vtx(m, t, 0) * 3, b = MeshAnalysis.vtx(m, t, 1) * 3, c = MeshAnalysis.vtx(m, t, 2) * 3;
+            double ax = p[a] - ox, ay = p[a + 1] - oy, az = p[a + 2] - oz;
+            double bx = p[b] - ox, by = p[b + 1] - oy, bz = p[b + 2] - oz;
+            double cx = p[c] - ox, cy = p[c + 1] - oy, cz = p[c + 2] - oz;
+            double ux = bx - ax, uy = by - ay, uz = bz - az, vx = cx - ax, vy = cy - ay, vz = cz - az;
+            double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+            double area = 0.5 * Math.sqrt(nx * nx + ny * ny + nz * nz);
+            if (area <= 0) continue;
+            double sx = ax + bx + cx, sy = ay + by + cy, sz = az + bz + cz;
+            A += area;
+            gx += area * sx / 3; gy += area * sy / 3; gz += area * sz / 3;
+            double k = area / 12.0;
+            xx += k * (ax * ax + bx * bx + cx * cx + sx * sx);
+            yy += k * (ay * ay + by * by + cy * cy + sy * sy);
+            zz += k * (az * az + bz * bz + cz * cz + sz * sz);
+            xy += k * (ax * ay + bx * by + cx * cy + sx * sy);
+            xz += k * (ax * az + bx * bz + cx * cz + sx * sz);
+            yz += k * (ay * az + by * bz + cy * cz + sy * sz);
+        }
+        if (A <= 0) return covariance(m, mean);
+        double mx = gx / A, my = gy / A, mz = gz / A;
+        if (mean != null) { mean[0] = mx + ox; mean[1] = my + oy; mean[2] = mz + oz; }
+        return new double[][]{
+                {xx / A - mx * mx, xy / A - mx * my, xz / A - mx * mz},
+                {xy / A - mx * my, yy / A - my * my, yz / A - my * mz},
+                {xz / A - mx * mz, yz / A - my * mz, zz / A - mz * mz}};
+    }
+
     /** Covariância dos vértices (amostrada para malhas enormes). mean[3] recebe a média. */
     static double[][] covariance(Mesh m, double[] mean) {
         float[] p = m.positions;

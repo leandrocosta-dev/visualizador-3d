@@ -45,10 +45,11 @@ public class MainActivity extends Activity {
     private static final int REQ_OPEN = 1;
     private static final int REQ_SAVE_STL = 2;
     private static final int REQ_SAVE_PLY = 3;
+    private static final int REQ_OPEN_REF = 4;
     private static final Locale BR = new Locale("pt", "BR");
 
     private static final int TOOL_NONE = -1, TOOL_OPEN = 0, TOOL_VIEW = 1, TOOL_MEASURE = 2, TOOL_CUT = 3,
-            TOOL_ALIGN = 4, TOOL_ANALYZE = 5, TOOL_SAVE = 6;
+            TOOL_ALIGN = 4, TOOL_ANALYZE = 5, TOOL_COMPARE = 6, TOOL_SAVE = 7;
     private static final int MAX_RECENT = 10;
 
     private static final int C_BTN = 0xCC2E3B4E;
@@ -62,8 +63,8 @@ public class MainActivity extends Activity {
     private ProgressBar progress;
     private LinearLayout bottom, toolbar;
     private ScrollView panelScroll;
-    private final View[] panels = new View[7];
-    private final Button[] toolButtons = new Button[7];
+    private final View[] panels = new View[8];
+    private final Button[] toolButtons = new Button[8];
     private int tool = TOOL_NONE;
 
     private Mesh current;
@@ -114,6 +115,24 @@ public class MainActivity extends Activity {
     private static final String[] MAT_NAMES = {"PLA", "PETG", "ABS", "Resina", "Alumínio", "Aço"};
     private static final double[] MAT_DENS = {1.24, 1.27, 1.04, 1.15, 2.70, 7.85};
     private Button materialBtn, bordersBtn;
+
+    // Comparar
+    private static final double[] TOLS = {0.02, 0.05, 0.1, 0.2, 0.5, 1.0};
+    private Mesh refMesh;
+    private Deviation.RefIndex refIndex;
+    private float[] scanDev, liteDev;
+    private byte[] scanOrigColors, liteOrigColors;
+    private Mesh devMesh, devLite;
+    private boolean devActive = false;
+    private int tolIdx = 2;
+    private String alignInfo = null;
+    private String pointInfo = null;
+    private double[] comparePick = null;
+    private boolean showRefMesh = true;
+    private TextView compareText;
+    private LegendView legend;
+    private Button showRefBtn;
+    private final Button[] tolBtns = new Button[TOLS.length];
 
     // Apresentação
     private boolean presenting = false;
@@ -175,6 +194,7 @@ public class MainActivity extends Activity {
         panels[TOOL_CUT] = buildCutPanel();
         panels[TOOL_ALIGN] = buildAlignPanel();
         panels[TOOL_ANALYZE] = buildAnalyzePanel();
+        panels[TOOL_COMPARE] = buildComparePanel();
         panels[TOOL_SAVE] = buildSavePanel();
 
         HorizontalScrollView tbScroll = new HorizontalScrollView(this);
@@ -182,7 +202,7 @@ public class MainActivity extends Activity {
         toolbar = new LinearLayout(this);
         toolbar.setOrientation(LinearLayout.HORIZONTAL);
         toolbar.setPadding(dp(6), dp(4), dp(6), dp(8));
-        String[] names = {"Abrir", "Vista", "Medir", "Corte", "Alinhar", "Análise", "Salvar"};
+        String[] names = {"Abrir", "Vista", "Medir", "Corte", "Alinhar", "Análise", "Comparar", "Salvar"};
         for (int i = 0; i < names.length; i++) {
             final int t = i;
             toolButtons[i] = toolButton(names[i], v -> selectTool(t));
@@ -295,6 +315,7 @@ public class MainActivity extends Activity {
             if (tool == TOOL_OPEN) selectTool(TOOL_OPEN);
             load(uri);
         }
+        else if (req == REQ_OPEN_REF) loadReference(uri);
         else if (req == REQ_SAVE_STL) exportTo(uri, false);
         else if (req == REQ_SAVE_PLY) exportTo(uri, true);
     }
@@ -374,6 +395,13 @@ public class MainActivity extends Activity {
         lockedName = null;
         clipAxis = -1;
         analysis = null;
+        devActive = false;
+        scanDev = liteDev = null;
+        scanOrigColors = liteOrigColors = null;
+        devMesh = devLite = null;
+        alignInfo = null;
+        pointInfo = null;
+        comparePick = null;
         glView.renderer.setMesh(m);
         glView.requestRender();
         updateInfo(String.format(BR, "Carregado em %.1f s", ms / 1000f));
@@ -382,6 +410,7 @@ public class MainActivity extends Activity {
         refreshClipButtons();
         refreshClipText();
         refreshAnalysis();
+        refreshCompare();
     }
 
     private void showError(String name, String msg) {
@@ -434,7 +463,8 @@ public class MainActivity extends Activity {
         }
         final Mesh m = current;
         if (m == null || busy) return;
-        if (tool != TOOL_MEASURE && tool != TOOL_ALIGN) return;
+        if (tool != TOOL_MEASURE && tool != TOOL_ALIGN && tool != TOOL_COMPARE) return;
+        if (tool == TOOL_COMPARE && refIndex == null) { toast("Abra o CAD de referência primeiro"); return; }
         final float[] mvp = new float[16];
         final int[] size = new int[2];
         if (!glView.renderer.snapshot(m, mvp, size)) return;
@@ -450,6 +480,7 @@ public class MainActivity extends Activity {
                     return;
                 }
                 if (forTool == TOOL_MEASURE) addMeasurePick(h);
+                else if (forTool == TOOL_COMPARE) comparePoint(h);
                 else addAlignPick(h);
             });
         });
@@ -842,6 +873,10 @@ public class MainActivity extends Activity {
         busy = false;
         progress.setVisibility(View.GONE);
         if (m != current) return;
+        clearDeviation();
+        pointInfo = null;
+        comparePick = null;
+        refreshCompare();
         aPicks.clear();
         mPicks.clear();
         analysis = null;
@@ -998,6 +1033,250 @@ public class MainActivity extends Activity {
         analyzeText.setText(s.toString().trim());
     }
 
+    // ---------------------------------------------------------------- Comparar
+
+    private View buildComparePanel() {
+        LinearLayout p = panel();
+        compareText = text();
+        p.addView(compareText);
+        showRefBtn = btn("CAD: visível", v -> {
+            showRefMesh = !showRefMesh;
+            showRefBtn.setText(showRefMesh ? "CAD: visível" : "CAD: oculto");
+            glView.renderer.setShowReference(showRefMesh);
+            glView.requestRender();
+        });
+        p.addView(row(btn("Abrir CAD...", v -> openReferencePicker()), showRefBtn));
+        p.addView(row(btn("Alinhar automático", v -> icpAlign(false)), btn("Refinar", v -> icpAlign(true))));
+        p.addView(row(btn("Calcular desvios", v -> computeDeviation()), btn("Limpar mapa", v -> {
+            clearDeviation();
+            pointInfo = null;
+            comparePick = null;
+            refreshCompare();
+            updateOverlay();
+        })));
+        p.addView(label("Tolerância (± mm):"));
+        for (int i = 0; i < TOLS.length; i++) {
+            final int k = i;
+            tolBtns[i] = btn(String.format(BR, "%.2f", TOLS[i]), v -> {
+                tolIdx = k;
+                refreshCompare();
+                recolor();
+            });
+        }
+        p.addView(row(tolBtns));
+        legend = new LegendView(this);
+        legend.setTolerance(TOLS[tolIdx]);
+        p.addView(legend, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+        refreshCompare();
+        return p;
+    }
+
+    private void openReferencePicker() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        startActivityForResult(i, REQ_OPEN_REF);
+    }
+
+    private void loadReference(Uri uri) {
+        final ContentResolver cr = getContentResolver();
+        if (busy) return;
+        busy = true;
+        progress.setVisibility(View.VISIBLE);
+        compareText.setText("Carregando CAD...");
+        worker.execute(() -> {
+            String name = "referência";
+            try (Cursor c = cr.query(uri, null, null, null, null)) {
+                if (c != null && c.moveToFirst()) {
+                    int ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                    if (ni >= 0 && !c.isNull(ni)) name = c.getString(ni);
+                }
+            } catch (Exception ignored) {
+            }
+            Mesh r = null;
+            Deviation.RefIndex idx = null;
+            String err = null;
+            try {
+                r = MeshLoader.load(() -> {
+                    InputStream in = cr.openInputStream(uri);
+                    if (in == null) throw new java.io.IOException("Não foi possível abrir o arquivo");
+                    return in;
+                }, name, -1);
+                if (r.pointCloud) throw new java.io.IOException("A referência precisa ser uma malha (STL, PLY ou OBJ com faces)");
+                idx = new Deviation.RefIndex(r);
+            } catch (OutOfMemoryError e) {
+                err = "Memória insuficiente para a referência";
+            } catch (Exception e) {
+                err = e.getMessage() != null ? e.getMessage() : e.toString();
+            }
+            final Mesh fr = r;
+            final Deviation.RefIndex fi = idx;
+            final String fe = err;
+            runOnUiThread(() -> {
+                busy = false;
+                progress.setVisibility(View.GONE);
+                if (fe != null) {
+                    toast("Erro no CAD: " + fe);
+                    refreshCompare();
+                    return;
+                }
+                refMesh = fr;
+                refIndex = fi;
+                clearDeviation();
+                alignInfo = null;
+                glView.renderer.setReference(fr);
+                glView.requestRender();
+                refreshCompare();
+            });
+        });
+    }
+
+    private void icpAlign(boolean refineOnly) {
+        final Mesh m = current;
+        final Mesh r = refMesh;
+        final Deviation.RefIndex idx = refIndex;
+        if (m == null) { toast("Abra o scan primeiro"); return; }
+        if (idx == null) { toast("Abra o CAD de referência primeiro"); return; }
+        compareText.setText(refineOnly ? "Refinando alinhamento (ICP)..." : "Alinhando (pode levar alguns segundos)...");
+        final Icp.Result[] holder = new Icp.Result[1];
+        runTransform(() -> {
+            Icp.Result res = refineOnly ? Icp.refineOnly(m, idx) : Icp.align(m, r, idx);
+            if (res == null) throw new IllegalStateException("Não foi possível alinhar. Pré-alinhe em Alinhar e use Refinar.");
+            holder[0] = res;
+            return res.transform;
+        }, () -> {
+            Icp.Result res = holder[0];
+            String q = String.format(BR, "Alinhamento: %.0f%% dos pontos casaram, RMS %.3f mm", res.matchedFraction * 100, res.rms);
+            if (res.matchedFraction < 0.85) {
+                q += "\n⚠ Alinhamento duvidoso. Se o scan tem mesa ou suporte, limpe no Revo Scan, ou pré-alinhe em Alinhar e use Refinar.";
+            }
+            alignInfo = q;
+            glView.post(this::computeDeviation);
+        });
+    }
+
+    private void computeDeviation() {
+        final Mesh m = current;
+        final Deviation.RefIndex idx = refIndex;
+        if (m == null || idx == null) { toast("Abra o scan e o CAD"); return; }
+        if (busy) return;
+        busy = true;
+        progress.setVisibility(View.VISIBLE);
+        compareText.setText("Calculando desvios...");
+        final Mesh l = currentLite;
+        worker.execute(() -> {
+            float[] d = null, dl = null;
+            String err = null;
+            try {
+                final int[] last = {-1};
+                d = Deviation.compute(m, idx, Deviation.MAX_SEARCH, pct -> {
+                    if (pct / 5 != last[0]) {
+                        last[0] = pct / 5;
+                        runOnUiThread(() -> { if (busy) compareText.setText("Calculando desvios... " + pct + "%"); });
+                    }
+                });
+                if (l != null) dl = Deviation.compute(l, idx, Deviation.MAX_SEARCH, null);
+            } catch (OutOfMemoryError e) {
+                err = "Memória insuficiente para o mapa de desvios";
+            } catch (Exception e) {
+                err = e.toString();
+            }
+            final float[] fd = d, fdl = dl;
+            final String fe = err;
+            runOnUiThread(() -> {
+                busy = false;
+                progress.setVisibility(View.GONE);
+                if (m != current) return;
+                if (fe != null) { toast(fe); refreshCompare(); return; }
+                if (!devActive) {
+                    scanOrigColors = m.colors;
+                    liteOrigColors = l != null ? l.colors : null;
+                }
+                devMesh = m;
+                devLite = l;
+                scanDev = fd;
+                liteDev = fdl;
+                devActive = true;
+                recolor();
+            });
+        });
+    }
+
+    /** Pinta o scan com as cores do desvio para a tolerância atual. */
+    private void recolor() {
+        if (legend != null) legend.setTolerance(TOLS[tolIdx]);
+        if (!devActive || scanDev == null) { refreshCompare(); return; }
+        double tol = TOLS[tolIdx], range = LegendView.range(tol);
+        devMesh.colors = Deviation.colorize(scanDev, tol, range);
+        if (devLite != null && liteDev != null) devLite.colors = Deviation.colorize(liteDev, tol, range);
+        glView.renderer.reupload();
+        glView.requestRender();
+        refreshCompare();
+    }
+
+    private void clearDeviation() {
+        if (!devActive) return;
+        if (devMesh != null) devMesh.colors = scanOrigColors;
+        if (devLite != null) devLite.colors = liteOrigColors;
+        devActive = false;
+        scanDev = liteDev = null;
+        devMesh = devLite = null;
+        glView.renderer.reupload();
+        glView.requestRender();
+    }
+
+    private void comparePoint(Picker.Hit h) {
+        final Deviation.RefIndex idx = refIndex;
+        if (idx == null) return;
+        final double[] p = h.p;
+        worker.execute(() -> {
+            double d = idx.signedDistance(p[0], p[1], p[2], Deviation.MAX_SEARCH, new double[4]);
+            runOnUiThread(() -> {
+                comparePick = p;
+                pointInfo = Double.isNaN(d) ? "Ponto tocado: sem correspondência no CAD"
+                        : String.format(BR, "Ponto tocado: %+.3f mm", d);
+                refreshCompare();
+                updateOverlay();
+            });
+        });
+    }
+
+    private String deviationSummary() {
+        Deviation.Stats st = Deviation.stats(scanDev, TOLS[tolIdx]);
+        return String.format(BR, "Desvio ±%.2f: %.1f%% dentro · máx %+.3f · mín %+.3f · RMS %.3f mm",
+                TOLS[tolIdx], st.inTol, st.max, st.min, st.rms);
+    }
+
+    private void refreshCompare() {
+        if (compareText == null) return;
+        for (int i = 0; i < tolBtns.length; i++) setSel(tolBtns[i], i == tolIdx);
+        StringBuilder s = new StringBuilder();
+        if (refMesh == null) {
+            s.append("1. Abra o scan (Abrir) e o CAD de referência (STL do NX).\n")
+             .append("2. Alinhar automático (peça inteira) ou pré-alinhe em Alinhar e use Refinar.\n")
+             .append("3. Toque na peça para ver o desvio em qualquer ponto.");
+        } else {
+            s.append("CAD: ").append(refMesh.name).append(String.format(BR, " (%,d triângulos)", refMesh.triangleCount));
+            if (alignInfo != null) s.append('\n').append(alignInfo);
+            if (devActive && scanDev != null) {
+                double tol = TOLS[tolIdx];
+                Deviation.Stats st = Deviation.stats(scanDev, tol);
+                double tot = Math.max(1, st.matched + st.unmatched);
+                s.append(String.format(BR, "\n%.1f%% dentro de ±%.2f · %.1f%% acima · %.1f%% abaixo", st.inTol, tol, st.above, st.below));
+                s.append(String.format(BR, "\nMédia %+.3f · Desvio padrão %.3f · RMS %.3f mm", st.mean, st.std, st.rms));
+                s.append(String.format(BR, "\nMáx %+.3f · Mín %+.3f mm", st.max, st.min));
+                if (st.unmatched > 0) {
+                    s.append(String.format(BR, "\nSem correspondência (cinza, além de %.2f mm): %.1f%%",
+                            Deviation.cutoff(tol), 100.0 * st.unmatched / tot));
+                }
+            } else if (current != null) {
+                s.append("\nAlinhe e toque em Calcular desvios.");
+            }
+        }
+        if (pointInfo != null) s.append('\n').append(pointInfo);
+        compareText.setText(s.toString());
+    }
+
     // ---------------------------------------------------------------- Apresentação
 
     private void setPresenting(boolean on) {
@@ -1015,7 +1294,7 @@ public class MainActivity extends Activity {
     private View buildSavePanel() {
         LinearLayout p = panel();
         saveText = text();
-        saveText.setText("A foto e os arquivos exportados já saem com o alinhamento aplicado.");
+        saveText.setText("A foto e os arquivos exportados já saem com o alinhamento aplicado. Com o mapa de desvios ativo, a foto leva as estatísticas e o PLY leva as cores do mapa.");
         p.addView(saveText);
         p.addView(row(
                 btn("Foto da tela", v -> captureAndShare()),
@@ -1092,7 +1371,8 @@ public class MainActivity extends Activity {
         if (m == null) { toast("Abra um arquivo primeiro"); return; }
         final String caption = m.name + "   X " + f2(m.max[0] - m.min[0]) + " · Y " + f2(m.max[1] - m.min[1])
                 + " · Z " + f2(m.max[2] - m.min[2]) + " mm";
-        final String measure = (tool == TOOL_MEASURE && measureText != null && hasMeasureResult())
+        final String measure = devActive ? deviationSummary()
+                : (tool == TOOL_MEASURE && measureText != null && hasMeasureResult())
                 ? measureText.getText().toString().replace('\n', ' ') : null;
         glView.renderer.capture(bmp -> worker.execute(() -> {
             try {
@@ -1179,6 +1459,8 @@ public class MainActivity extends Activity {
             glView.renderer.setOverlay(null, null, bl, bc);
             glView.requestRender();
             return;
+        } else if (tool == TOOL_COMPARE && comparePick != null) {
+            add(pts, ptc, comparePick, new float[]{1f, 1f, 1f});
         } else if (tool == TOOL_ALIGN) {
             for (Picker.Hit h : aPicks) add(pts, ptc, h.p, magenta);
             if (edgeMode && aPicks.size() >= 2) {

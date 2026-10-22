@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -26,3 +29,14 @@ jobs:
         with:
           name: Visualizador3D-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publicar APK como release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk Visualizador3D.apk
+          gh release create "build-${{ github.run_number }}" Visualizador3D.apk \
+            --title "Visualizador 3D (build ${{ github.run_number }})" \
+            --notes "APK gerado automaticamente a partir do commit ${{ github.sha }}." \
+            --latest

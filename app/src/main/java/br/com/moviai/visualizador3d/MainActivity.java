@@ -51,7 +51,8 @@ public class MainActivity extends Activity {
     private static final Locale BR = new Locale("pt", "BR");
 
     private static final int TOOL_NONE = -1, TOOL_OPEN = 0, TOOL_VIEW = 1, TOOL_MEASURE = 2, TOOL_CUT = 3,
-            TOOL_ALIGN = 4, TOOL_ANALYZE = 5, TOOL_COMPARE = 6, TOOL_SAVE = 7;
+            TOOL_ALIGN = 4, TOOL_ANALYZE = 5, TOOL_COMPARE = 6, TOOL_SAVE = 7,
+            TOOL_NOTES = 8, TOOL_QUOTE = 9;
     private static final int MAX_RECENT = 10;
 
     private static final int C_BTN = 0xCC2E3B4E;
@@ -65,8 +66,8 @@ public class MainActivity extends Activity {
     private ProgressBar progress;
     private LinearLayout bottom, toolbar;
     private ScrollView panelScroll;
-    private final View[] panels = new View[8];
-    private final Button[] toolButtons = new Button[8];
+    private final View[] panels = new View[10];
+    private final Button[] toolButtons = new Button[10];
     private int tool = TOOL_NONE;
 
     private Mesh current;
@@ -165,6 +166,32 @@ public class MainActivity extends Activity {
     private Button showRefBtn;
     private final Button[] tolBtns = new Button[TOLS.length];
 
+    // Notas
+    private NotesView notesView;
+    private final List<NotesView.Note> notes = new ArrayList<>();
+    private LinearLayout notesList;
+
+    // Espessura
+    private static final double[] THICK_MIN = {0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 3.0};
+    private int thickIdx = 2;
+    private boolean thickActive = false;
+    private Thickness.Result thickRes;
+    private float[] thickVals, thickLiteVals;
+    private byte[] thickOrigColors, thickLiteOrigColors;
+    private Mesh thickMesh, thickLite;
+    private double thickReach;
+    private Deviation.RefIndex selfIndex;
+    private Mesh selfIndexMesh;
+    private String thickPoint;
+    private Button thickMinBtn;
+
+    // Orçamento
+    private final Quote.Params qp = new Quote.Params();
+    private Quote.Result qres;
+    private TextView quoteText;
+    private Button qTechBtn, qMatBtn, qFillBtn, qQtyBtn;
+    private static final double[] INFILLS = {0.10, 0.15, 0.20, 0.30, 0.50, 1.00};
+
     // Apresentação
     private boolean presenting = false;
     private TextView watermark;
@@ -180,6 +207,10 @@ public class MainActivity extends Activity {
         glView.setTapListener(this::onTap);
         root.addView(glView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        notesView = new NotesView(this);
+        root.addView(notesView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        glView.renderer.setFrameListener(notesView::onFrame);
 
         info = new TextView(this);
         info.setTextColor(Color.WHITE);
@@ -227,17 +258,20 @@ public class MainActivity extends Activity {
         panels[TOOL_ANALYZE] = buildAnalyzePanel();
         panels[TOOL_COMPARE] = buildComparePanel();
         panels[TOOL_SAVE] = buildSavePanel();
+        panels[TOOL_NOTES] = buildNotesPanel();
+        panels[TOOL_QUOTE] = buildQuotePanel();
 
         HorizontalScrollView tbScroll = new HorizontalScrollView(this);
         tbScroll.setHorizontalScrollBarEnabled(false);
         toolbar = new LinearLayout(this);
         toolbar.setOrientation(LinearLayout.HORIZONTAL);
         toolbar.setPadding(dp(6), dp(4), dp(6), dp(8));
-        String[] names = {"Abrir", "Vista", "Medir", "Corte", "Alinhar", "Análise", "Comparar", "Salvar"};
-        for (int i = 0; i < names.length; i++) {
-            final int t = i;
-            toolButtons[i] = toolButton(names[i], v -> selectTool(t));
-            toolbar.addView(toolButtons[i]);
+        String[] names = {"Abrir", "Vista", "Medir", "Corte", "Alinhar", "Análise", "Comparar", "Salvar", "Notas", "Orçar"};
+        int[] order = {TOOL_OPEN, TOOL_VIEW, TOOL_MEASURE, TOOL_NOTES, TOOL_CUT, TOOL_ALIGN, TOOL_ANALYZE,
+                TOOL_COMPARE, TOOL_QUOTE, TOOL_SAVE};
+        for (int t : order) {
+            toolButtons[t] = toolButton(names[t], v -> selectTool(t));
+            toolbar.addView(toolButtons[t]);
         }
         tbScroll.addView(toolbar);
         bottom.addView(tbScroll);
@@ -446,6 +480,19 @@ public class MainActivity extends Activity {
         fitPrev = fitCur = null;
         topoMesh = null;
         topo = null;
+        thickActive = false;
+        thickRes = null;
+        thickVals = thickLiteVals = null;
+        thickOrigColors = thickLiteOrigColors = null;
+        thickMesh = thickLite = null;
+        thickPoint = null;
+        selfIndex = null;
+        selfIndexMesh = null;
+        qres = null;
+        notes.clear();
+        notesView.setNotes(notes);
+        refreshNotes();
+        refreshQuote();
         glView.renderer.setMesh(m);
         glView.requestRender();
         updateInfo(String.format(BR, "Carregado em %.1f s", ms / 1000f));
@@ -507,7 +554,8 @@ public class MainActivity extends Activity {
         }
         final Mesh m = current;
         if (m == null || busy) return;
-        if (tool != TOOL_MEASURE && tool != TOOL_ALIGN && tool != TOOL_COMPARE) return;
+        if (tool != TOOL_MEASURE && tool != TOOL_ALIGN && tool != TOOL_COMPARE && tool != TOOL_NOTES
+                && !(tool == TOOL_ANALYZE && thickActive)) return;
         if (tool == TOOL_COMPARE && refIndex == null) { toast("Abra o CAD de referência primeiro"); return; }
         final float[] mvp = new float[16];
         final int[] size = new int[2];
@@ -525,6 +573,8 @@ public class MainActivity extends Activity {
                 }
                 if (forTool == TOOL_MEASURE) addMeasurePick(h);
                 else if (forTool == TOOL_COMPARE) comparePoint(h);
+                else if (forTool == TOOL_NOTES) askNote(h.p);
+                else if (forTool == TOOL_ANALYZE) thicknessAt(h);
                 else addAlignPick(h);
             });
         });
@@ -1117,7 +1167,10 @@ public class MainActivity extends Activity {
             m.applyTransform(inv);
             Mesh l = currentLite;
             if (l != null) l.applyTransform(inv);
-            runOnUiThread(() -> afterTransform(m, null));
+            runOnUiThread(() -> {
+                transformNotes(inv);
+                afterTransform(m, null);
+            });
         });
     }
 
@@ -1134,7 +1187,10 @@ public class MainActivity extends Activity {
             m.applyTransform(inv);
             Mesh l = currentLite;
             if (l != null) l.applyTransform(inv);
-            runOnUiThread(() -> afterTransform(m, null));
+            runOnUiThread(() -> {
+                transformNotes(inv);
+                afterTransform(m, null);
+            });
         });
     }
 
@@ -1170,6 +1226,7 @@ public class MainActivity extends Activity {
                     return;
                 }
                 history.add(res);
+                transformNotes(res);
                 if (onSuccess != null) onSuccess.run();
                 afterTransform(m, null);
             });
@@ -1181,6 +1238,9 @@ public class MainActivity extends Activity {
         progress.setVisibility(View.GONE);
         if (m != current) return;
         clearDeviation();
+        clearThickness();
+        qres = null;
+        refreshQuote();
         pointInfo = null;
         comparePick = null;
         fitPrev = fitCur = null;
@@ -1277,6 +1337,25 @@ public class MainActivity extends Activity {
             refreshAnalysis();
         });
         p.addView(row(btn("Analisar", v -> runAnalysis()), bordersBtn, materialBtn));
+        p.addView(label("Espessura de parede:"));
+        thickMinBtn = btn("Mín. " + f2(THICK_MIN[thickIdx]) + " mm", v -> {
+            thickIdx = (thickIdx + 1) % THICK_MIN.length;
+            thickMinBtn.setText("Mín. " + f2(THICK_MIN[thickIdx]) + " mm");
+            if (thickActive) {
+                if (THICK_MIN[thickIdx] * 6 > thickReach) computeThickness();
+                else recolorThickness();
+            }
+        });
+        p.addView(row(btn("Mapa de espessura", v -> computeThickness()), thickMinBtn, btn("Limpar", v -> {
+            clearThickness();
+            refreshAnalysis();
+            updateOverlay();
+        })));
+        p.addView(row(btn("+ Relatório", v -> {
+            if (thickActive) addReportItem(thicknessSummary());
+            else if (analysis != null) addReportItem(analyzeText.getText().toString());
+            else toast("Analise a malha primeiro");
+        })));
         refreshAnalysis();
         return p;
     }
@@ -1309,6 +1388,10 @@ public class MainActivity extends Activity {
                 analysis = res;
                 refreshAnalysis();
                 updateOverlay();
+                if (quoteAfterAnalysis) {
+                    quoteAfterAnalysis = false;
+                    updateQuote();
+                }
             });
         });
     }
@@ -1316,10 +1399,21 @@ public class MainActivity extends Activity {
     private void refreshAnalysis() {
         if (analyzeText == null) return;
         MeshAnalysis a = analysis;
+        if (thickActive && thickRes != null) {
+            String t = thicknessSummary();
+            if (thickPoint != null) t += "\n" + thickPoint;
+            if (a != null) t += "\n\n" + analysisText(a);
+            analyzeText.setText(t);
+            return;
+        }
         if (a == null) {
             analyzeText.setText("Verifica se a malha está fechada (pronta para impressão ou CAD), mostra furos e bordas abertas em vermelho, ilhas soltas, área, volume e massa estimada.");
             return;
         }
+        analyzeText.setText(analysisText(a));
+    }
+
+    private String analysisText(MeshAnalysis a) {
         StringBuilder s = new StringBuilder();
         s.append(a.closed ? "✔ Malha fechada (estanque)" : "✖ Malha aberta").append('\n');
         s.append("Área: ").append(f2(a.area)).append(" mm² (").append(f2(a.area / 100.0)).append(" cm²)\n");
@@ -1339,7 +1433,128 @@ public class MainActivity extends Activity {
         if (a.degenerate > 0) s.append("Triângulos degenerados: ").append(String.format(BR, "%,d", a.degenerate)).append('\n');
         if (a.inverted) s.append("Normais invertidas (malha de dentro para fora)\n");
         if (a.boundaryEdges > MeshAnalysis.MAX_OVERLAY_EDGES) s.append("Exibindo as primeiras ").append(String.format(BR, "%,d", MeshAnalysis.MAX_OVERLAY_EDGES)).append(" bordas.\n");
-        analyzeText.setText(s.toString().trim());
+        return s.toString().trim();
+    }
+
+    // ---------------------------------------------------------------- Espessura de parede
+
+    private void computeThickness() {
+        final Mesh m = current;
+        if (m == null) { toast("Abra um arquivo primeiro"); return; }
+        if (m.pointCloud) { toast("Nuvem de pontos não tem superfície para medir espessura"); return; }
+        if (busy) return;
+        clearDeviation();
+        busy = true;
+        progress.setVisibility(View.VISIBLE);
+        analyzeText.setText("Calculando espessura...");
+        final Mesh l = currentLite;
+        final double reach = THICK_MIN[thickIdx] * 6;
+        worker.execute(() -> {
+            Thickness.Result r = null, rl = null;
+            String err = null;
+            try {
+                if (topoMesh != m) {
+                    topo = new Fit.Topology(m);
+                    topoMesh = m;
+                }
+                if (selfIndexMesh != m) {
+                    selfIndex = new Deviation.RefIndex(m);
+                    selfIndexMesh = m;
+                }
+                final int[] last = {-1};
+                r = Thickness.compute(m, topo, selfIndex, reach, pct -> {
+                    if (pct / 5 != last[0]) {
+                        last[0] = pct / 5;
+                        runOnUiThread(() -> { if (busy) analyzeText.setText("Calculando espessura... " + pct + "%"); });
+                    }
+                });
+                if (l != null) {
+                    rl = Thickness.compute(l, new Fit.Topology(l), new Deviation.RefIndex(l), reach, null);
+                }
+            } catch (OutOfMemoryError e) {
+                err = "Memória insuficiente para o mapa de espessura";
+            } catch (Exception e) {
+                err = e.toString();
+            }
+            final Thickness.Result fr = r, frl = rl;
+            final String fe = err;
+            runOnUiThread(() -> {
+                busy = false;
+                progress.setVisibility(View.GONE);
+                if (m != current) return;
+                if (fe != null) { toast(fe); refreshAnalysis(); return; }
+                if (!thickActive) {
+                    thickOrigColors = m.colors;
+                    thickLiteOrigColors = l != null ? l.colors : null;
+                }
+                thickMesh = m;
+                thickLite = l;
+                thickRes = fr;
+                thickVals = fr.perVertex;
+                thickLiteVals = frl != null ? frl.perVertex : null;
+                thickReach = reach;
+                thickPoint = null;
+                thickActive = true;
+                recolorThickness();
+            });
+        });
+    }
+
+    private void recolorThickness() {
+        if (!thickActive) return;
+        double mn = THICK_MIN[thickIdx];
+        thickMesh.colors = Thickness.colorize(thickVals, mn);
+        if (thickLite != null && thickLiteVals != null) thickLite.colors = Thickness.colorize(thickLiteVals, mn);
+        glView.renderer.reupload();
+        glView.requestRender();
+        refreshAnalysis();
+        updateOverlay();
+    }
+
+    private void clearThickness() {
+        if (!thickActive) return;
+        if (thickMesh != null) thickMesh.colors = thickOrigColors;
+        if (thickLite != null) thickLite.colors = thickLiteOrigColors;
+        thickActive = false;
+        thickRes = null;
+        thickVals = thickLiteVals = null;
+        thickMesh = thickLite = null;
+        thickPoint = null;
+        glView.renderer.reupload();
+        glView.requestRender();
+    }
+
+    private String thicknessSummary() {
+        Thickness.Result r = thickRes;
+        double mn = THICK_MIN[thickIdx];
+        StringBuilder s = new StringBuilder();
+        if (r == null || Double.isNaN(r.min)) {
+            s.append("Espessura: nenhuma parede abaixo de ").append(f2(thickReach)).append(" mm");
+        } else {
+            s.append("Espessura mínima encontrada: ").append(f3(r.min)).append(" mm (marcador branco)");
+        }
+        s.append(String.format(BR, "\n%.1f%% da superfície abaixo de %.2f mm", Thickness.percentBelow(thickVals, mn), mn));
+        s.append("\nVermelho < mín. · amarelo até 2× · verde até 3× · azul: grossa");
+        return s.toString();
+    }
+
+    private void thicknessAt(Picker.Hit h) {
+        final Deviation.RefIndex idx = selfIndex;
+        if (idx == null || h.normal == null) return;
+        final double[] p = h.p;
+        final double[] n = h.normal;
+        worker.execute(() -> {
+            double sg = idx.sign;
+            double eps = Math.max(idx.diag * 1e-5, 1e-4);
+            double d = idx.raycast(p[0], p[1], p[2], -n[0] * sg, -n[1] * sg, -n[2] * sg, eps, idx.diag, true);
+            runOnUiThread(() -> {
+                thickPoint = Double.isNaN(d) ? "Ponto tocado: sem parede oposta"
+                        : "Ponto tocado: espessura " + f3(d) + " mm";
+                comparePick = p;
+                refreshAnalysis();
+                updateOverlay();
+            });
+        });
     }
 
     // ---------------------------------------------------------------- Comparar
@@ -1470,6 +1685,7 @@ public class MainActivity extends Activity {
     }
 
     private void computeDeviation() {
+        clearThickness();
         final Mesh m = current;
         final Deviation.RefIndex idx = refIndex;
         if (m == null || idx == null) { toast("Abra o scan e o CAD"); return; }
@@ -1808,7 +2024,7 @@ public class MainActivity extends Activity {
         busy = true;
         progress.setVisibility(View.VISIBLE);
         toast("Gerando relatório...");
-        if (tool != TOOL_NONE && tool != TOOL_MEASURE && tool != TOOL_COMPARE) selectTool(tool);
+        if (tool != TOOL_NONE && tool != TOOL_MEASURE && tool != TOOL_COMPARE && tool != TOOL_ANALYZE) selectTool(tool);
         final float[] cam = glView.renderer.saveCamera();
         glView.renderer.setBackground(0.96f, 0.97f, 0.98f);
         final Object[] views = {null, "ISO", ModelRenderer.VIEW_FRONT, ModelRenderer.VIEW_TOP};
@@ -1826,12 +2042,21 @@ public class MainActivity extends Activity {
         Object v = views[i];
         if ("ISO".equals(v)) glView.renderer.resetView();
         else if (v instanceof float[][]) glView.renderer.setView((float[][]) v);
-        glView.renderer.capture(bmp -> runOnUiThread(() -> {
+        glView.renderer.capture(bmp0 -> {
+            final float[] cm = glView.renderer.lastMvp;
+            runOnUiThread(() -> {
+            Bitmap bmp = bmp0;
+            if (!notes.isEmpty() && cm != null) {
+                bmp = bmp0.copy(Bitmap.Config.ARGB_8888, true);
+                NotesView.draw(new Canvas(bmp), notes, cm, bmp.getWidth(), bmp.getHeight(),
+                        getResources().getDisplayMetrics().density, 1f);
+            }
             int w = bmp.getWidth(), h = bmp.getHeight();
             float f = Math.min(1f, 1000f / Math.max(w, h));
             out.add(f < 1f ? Bitmap.createScaledBitmap(bmp, Math.round(w * f), Math.round(h * f), true) : bmp);
             captureChain(views, i + 1, out, done);
-        }));
+            });
+        });
         glView.requestRender();
     }
 
@@ -1883,7 +2108,17 @@ public class MainActivity extends Activity {
         }
         List<String> items = new ArrayList<>();
         for (int i = 0; i < reportItems.size(); i++) items.add((i + 1) + ". " + reportItems.get(i));
+        if (thickActive && thickRes != null) {
+            List<String> c = new ArrayList<>();
+            for (String line : thicknessSummary().split("\n")) c.add(line);
+            d.sections.put("Espessura de parede", c);
+        }
         d.sections.put("Medições", items);
+        if (!notes.isEmpty()) {
+            List<String> c = new ArrayList<>();
+            for (int i = 0; i < notes.size(); i++) c.add((i + 1) + ". " + notes.get(i).text);
+            d.sections.put("Anotações", c);
+        }
         if (!obs.isEmpty()) {
             List<String> o = new ArrayList<>();
             o.add(obs);
@@ -1920,6 +2155,265 @@ public class MainActivity extends Activity {
                 else toast("Relatório salvo");
             });
         });
+    }
+
+    // ---------------------------------------------------------------- Notas
+
+    private View buildNotesPanel() {
+        LinearLayout p = panel();
+        TextView t = text();
+        t.setText("Toque num ponto da peça para criar uma anotação numerada. Ela acompanha a peça e sai na foto e no relatório.");
+        p.addView(t);
+        notesList = new LinearLayout(this);
+        notesList.setOrientation(LinearLayout.VERTICAL);
+        p.addView(notesList);
+        p.addView(row(btn("Apagar todas", v -> {
+            notes.clear();
+            notesView.setNotes(notes);
+            refreshNotes();
+        })));
+        refreshNotes();
+        return p;
+    }
+
+    private void askNote(double[] pt) {
+        final android.widget.EditText e = new android.widget.EditText(this);
+        e.setHint("Ex.: furo danificado, recriar ressalto");
+        LinearLayout l = new LinearLayout(this);
+        l.setPadding(dp(20), dp(8), dp(20), 0);
+        l.addView(e, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Anotação " + (notes.size() + 1))
+                .setView(l)
+                .setPositiveButton("Adicionar", (d, w) -> {
+                    String txt = e.getText().toString().trim();
+                    if (txt.isEmpty()) return;
+                    notes.add(new NotesView.Note(pt.clone(), txt));
+                    notesView.setNotes(notes);
+                    refreshNotes();
+                    glView.requestRender();
+                })
+                .setNegativeButton("Cancelar", null)
+                .show();
+    }
+
+    private void refreshNotes() {
+        if (notesList == null) return;
+        notesList.removeAllViews();
+        for (int i = 0; i < notes.size(); i++) {
+            final int k = i;
+            TextView tv = text();
+            tv.setText((i + 1) + ". " + notes.get(i).text);
+            Button del = btn("Apagar", v -> {
+                notes.remove(k);
+                notesView.setNotes(notes);
+                refreshNotes();
+            });
+            LinearLayout r = new LinearLayout(this);
+            r.setOrientation(LinearLayout.HORIZONTAL);
+            r.setGravity(Gravity.CENTER_VERTICAL);
+            r.addView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            r.addView(del, new LinearLayout.LayoutParams(dp(84), dp(36)));
+            notesList.addView(r);
+        }
+    }
+
+    /** As notas são pontos da peça: acompanham alinhamentos e desfazer. */
+    private void transformNotes(float[] t) {
+        if (notes.isEmpty() || t == null) return;
+        for (NotesView.Note n : notes) {
+            double[] o = new double[4];
+            Mat4.transform(t, n.p[0], n.p[1], n.p[2], 1, o);
+            n.p = new double[]{o[0], o[1], o[2]};
+        }
+        notesView.setNotes(notes);
+    }
+
+    // ---------------------------------------------------------------- Orçamento
+
+    private View buildQuotePanel() {
+        loadQuoteParams();
+        LinearLayout p = panel();
+        quoteText = text();
+        p.addView(quoteText);
+        qTechBtn = btn("", v -> {
+            qp.tech = qp.tech == Quote.FDM ? Quote.RESIN : Quote.FDM;
+            // troca para um material compatível com a tecnologia
+            if (Quote.IS_RESIN[qp.material] != (qp.tech == Quote.RESIN)) qp.material = qp.tech == Quote.RESIN ? 4 : 0;
+            loadQuoteParams();
+            updateQuote();
+        });
+        qMatBtn = btn("", v -> {
+            int i = qp.material;
+            do { i = (i + 1) % Quote.MATERIALS.length; } while (Quote.IS_RESIN[i] != (qp.tech == Quote.RESIN));
+            qp.material = i;
+            loadQuoteParams();
+            updateQuote();
+        });
+        qFillBtn = btn("", v -> {
+            if (qp.tech == Quote.RESIN) {
+                qp.hollow = !qp.hollow;
+            } else {
+                int i = 0;
+                for (int k = 0; k < INFILLS.length; k++) if (Math.abs(INFILLS[k] - qp.infill) < 1e-6) i = k;
+                qp.infill = INFILLS[(i + 1) % INFILLS.length];
+            }
+            updateQuote();
+        });
+        p.addView(row(qTechBtn, qMatBtn, qFillBtn));
+        qQtyBtn = btn("", v -> {});
+        p.addView(row(btn("− peça", v -> { if (qp.qty > 1) qp.qty--; updateQuote(); }), qQtyBtn,
+                btn("+ peça", v -> { qp.qty++; updateQuote(); })));
+        p.addView(row(btn("Calcular", v -> computeQuote()), btn("Parâmetros...", v -> quoteParamsDialog()),
+                btn("Enviar ao cliente", v -> shareQuote())));
+        p.addView(row(btn("+ Relatório", v -> {
+            if (qres == null) { toast("Calcule o orçamento primeiro"); return; }
+            addReportItem("Orçamento · " + quoteText.getText().toString());
+        })));
+        refreshQuote();
+        return p;
+    }
+
+    private android.content.SharedPreferences qprefs() {
+        return getSharedPreferences("orcamento", MODE_PRIVATE);
+    }
+
+    private static final double[] DEFAULT_PRICE = {120, 130, 120, 180, 250, 350};
+
+    private void loadQuoteParams() {
+        android.content.SharedPreferences sp = qprefs();
+        String t = qp.tech == Quote.FDM ? "fdm" : "res";
+        qp.pricePerKg = sp.getFloat("preco_" + qp.material, (float) DEFAULT_PRICE[qp.material]);
+        qp.machinePerHour = sp.getFloat("hora_" + t, qp.tech == Quote.FDM ? 6f : 8f);
+        qp.setup = sp.getFloat("taxa", 15f);
+        qp.margin = sp.getFloat("margem", 60f) / 100.0;
+        qp.flow = sp.getFloat("vazao", 8f);
+        qp.secPerLayer = sp.getFloat("seg_camada", 8f);
+        qp.layer = sp.getFloat("camada_res", 0.05f);
+    }
+
+    private void quoteParamsDialog() {
+        loadQuoteParams();
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.VERTICAL);
+        l.setPadding(dp(20), dp(8), dp(20), 0);
+        String mat = Quote.MATERIALS[qp.material];
+        final android.widget.EditText price = numField(l, "Preço do " + mat + " (R$/kg)", qp.pricePerKg);
+        final android.widget.EditText hour = numField(l, "Hora de máquina " + (qp.tech == Quote.FDM ? "FDM" : "resina") + " (R$/h)", qp.machinePerHour);
+        final android.widget.EditText setup = numField(l, "Taxa fixa por peça: preparo e acabamento (R$)", qp.setup);
+        final android.widget.EditText margin = numField(l, "Margem sobre o custo (%)", qp.margin * 100);
+        final android.widget.EditText flow = numField(l, "FDM: vazão média (mm³/s; 8 normal, 15 rápida)", qp.flow);
+        final android.widget.EditText spl = numField(l, "Resina: segundos por camada", qp.secPerLayer);
+        final android.widget.EditText lay = numField(l, "Resina: altura de camada (mm)", qp.layer);
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Parâmetros do orçamento")
+                .setView(wrapScroll(l))
+                .setPositiveButton("Salvar", (d, w) -> {
+                    String t = qp.tech == Quote.FDM ? "fdm" : "res";
+                    qprefs().edit()
+                            .putFloat("preco_" + qp.material, num(price, qp.pricePerKg))
+                            .putFloat("hora_" + t, num(hour, qp.machinePerHour))
+                            .putFloat("taxa", num(setup, qp.setup))
+                            .putFloat("margem", num(margin, qp.margin * 100))
+                            .putFloat("vazao", Math.max(0.5f, num(flow, qp.flow)))
+                            .putFloat("seg_camada", Math.max(0.5f, num(spl, qp.secPerLayer)))
+                            .putFloat("camada_res", Math.max(0.01f, num(lay, qp.layer)))
+                            .apply();
+                    loadQuoteParams();
+                    updateQuote();
+                })
+                .setNegativeButton("Cancelar", null)
+                .show();
+    }
+
+    private View wrapScroll(View v) {
+        ScrollView sv = new ScrollView(this);
+        sv.addView(v);
+        return sv;
+    }
+
+    private android.widget.EditText numField(LinearLayout l, String hint, double value) {
+        l.addView(label(hint));
+        android.widget.EditText e = new android.widget.EditText(this);
+        e.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        e.setText(String.format(Locale.US, "%.2f", value));
+        e.setSingleLine(true);
+        l.addView(e);
+        return e;
+    }
+
+    private static float num(android.widget.EditText e, double def) {
+        try {
+            return Float.parseFloat(e.getText().toString().trim().replace(',', '.'));
+        } catch (Exception ex) {
+            return (float) def;
+        }
+    }
+
+    private void computeQuote() {
+        final Mesh m = current;
+        if (m == null) { toast("Abra um arquivo primeiro"); return; }
+        if (m.pointCloud) { toast("Nuvem de pontos não tem volume. Gere a malha antes."); return; }
+        if (analysis != null) { updateQuote(); return; }
+        runAnalysis();
+        // a análise roda em segundo plano; o orçamento é calculado quando ela termina
+        quoteText.setText("Calculando área e volume...");
+        quoteAfterAnalysis = true;
+    }
+
+    private boolean quoteAfterAnalysis = false;
+
+    private void updateQuote() {
+        Mesh m = current;
+        MeshAnalysis a = analysis;
+        if (m == null || a == null) { refreshQuote(); return; }
+        double height = m.max[2] - m.min[2];
+        qres = Quote.compute(qp, a.area, a.volume, height, a.closed);
+        refreshQuote();
+    }
+
+    private void refreshQuote() {
+        if (quoteText == null) return;
+        qTechBtn.setText(qp.tech == Quote.FDM ? "FDM" : "Resina");
+        qMatBtn.setText(Quote.MATERIALS[qp.material]);
+        qFillBtn.setText(qp.tech == Quote.RESIN ? (qp.hollow ? "Oca (2 mm)" : "Maciça")
+                : String.format(BR, "Preench. %.0f%%", qp.infill * 100));
+        qQtyBtn.setText(qp.qty + (qp.qty == 1 ? " peça" : " peças"));
+        Quote.Result r = qres;
+        if (r == null || current == null) {
+            quoteText.setText("Estimativa de custo e preço de impressão 3D a partir do volume e da área da peça. "
+                    + "A altura usada é o Z atual: alinhe a peça na orientação de impressão antes.");
+            return;
+        }
+        StringBuilder s = new StringBuilder();
+        s.append(qp.tech == Quote.FDM ? "FDM" : "Resina").append(" · ").append(Quote.MATERIALS[qp.material]).append(" · ")
+         .append(qFillBtn.getText()).append(" · ").append(qQtyBtn.getText()).append('\n');
+        s.append(String.format(BR, "Material: %.1f g por peça (%.1f cm³) · %s\n", r.massG, r.usedVolumeCm3, Quote.money(r.material)));
+        s.append("Tempo de impressão: ").append(Quote.hours(r.timeH)).append(qp.tech == Quote.FDM && qp.qty > 1 ? " por peça" : "")
+         .append(" · máquina ").append(Quote.money(r.machine)).append('\n');
+        s.append("Taxa fixa: ").append(Quote.money(r.setup)).append(" · custo total: ").append(Quote.money(r.cost)).append('\n');
+        s.append(String.format(BR, "Preço com margem de %.0f%%: ", qp.margin * 100)).append(Quote.money(r.price));
+        if (qp.qty > 1) s.append(" (").append(Quote.money(r.unitPrice)).append(" por peça)");
+        if (r.approx) s.append("\n⚠ Malha aberta: o volume é aproximado. Feche os furos para um orçamento exato.");
+        quoteText.setText(s.toString());
+    }
+
+    private void shareQuote() {
+        Mesh m = current;
+        Quote.Result r = qres;
+        if (m == null || r == null) { toast("Calcule o orçamento primeiro"); return; }
+        String body = "Orçamento de impressão 3D · MoviAI Engenharia Digital\n\n"
+                + "Peça: " + m.name + "\n"
+                + "Dimensões: " + f2(m.max[0] - m.min[0]) + " × " + f2(m.max[1] - m.min[1]) + " × " + f2(m.max[2] - m.min[2]) + " mm\n"
+                + "Processo: " + (qp.tech == Quote.FDM ? "impressão FDM" : "impressão em resina") + " em " + Quote.MATERIALS[qp.material]
+                + (qp.tech == Quote.FDM ? String.format(BR, ", preenchimento %.0f%%", qp.infill * 100) : (qp.hollow ? ", oca" : ", maciça")) + "\n"
+                + "Quantidade: " + qp.qty + "\n"
+                + "Valor: " + Quote.money(r.price) + (qp.qty > 1 ? " (" + Quote.money(r.unitPrice) + " por peça)" : "") + "\n\n"
+                + "Valores estimados a partir do modelo 3D; podem variar após a análise final de orientação e suportes.";
+        Intent i = new Intent(Intent.ACTION_SEND);
+        i.setType("text/plain");
+        i.putExtra(Intent.EXTRA_TEXT, body);
+        startActivity(Intent.createChooser(i, "Enviar orçamento"));
     }
 
     // ---------------------------------------------------------------- Apresentação
@@ -2033,9 +2527,16 @@ public class MainActivity extends Activity {
         final String measure = devActive ? deviationSummary()
                 : (tool == TOOL_MEASURE && measureText != null && hasMeasureResult())
                 ? measureText.getText().toString().replace('\n', ' ') : null;
-        glView.renderer.capture(bmp -> worker.execute(() -> {
+        final List<NotesView.Note> ns = new ArrayList<>(notes);
+        glView.renderer.capture(bmp -> {
+            final float[] cm = glView.renderer.lastMvp;
+            worker.execute(() -> {
             try {
                 Bitmap out = withFooter(bmp, caption, measure);
+                if (!ns.isEmpty() && cm != null) {
+                    NotesView.draw(new Canvas(out), ns, cm, bmp.getWidth(), bmp.getHeight(),
+                            getResources().getDisplayMetrics().density, 1f);
+                }
                 String ts = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
                 File f = freshShareFile("captura_" + ts + ".png");
                 try (OutputStream os = new FileOutputStream(f)) {
@@ -2045,7 +2546,8 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 runOnUiThread(() -> toast("Erro na captura: " + e.getMessage()));
             }
-        }));
+            });
+        });
         glView.requestRender();
     }
 
@@ -2131,11 +2633,17 @@ public class MainActivity extends Activity {
                 fitOverlay(fitPrev, new float[]{1f, 0.6f, 0.2f}, pts, ptc, ln, lnc);
                 fitOverlay(fitCur, new float[]{0.3f, 1f, 0.5f}, pts, ptc, ln, lnc);
             }
-        } else if (tool == TOOL_ANALYZE && showBorders && analysis != null && analysis.boundaryLines.length > 0) {
-            float[] bl = analysis.boundaryLines;
-            float[] bc = new float[bl.length];
-            for (int i = 0; i < bc.length; i += 3) { bc[i] = 1f; bc[i + 1] = 0.25f; bc[i + 2] = 0.25f; }
-            glView.renderer.setOverlay(null, null, bl, bc);
+        } else if (tool == TOOL_ANALYZE) {
+            float[] bl = null, bc = null;
+            if (showBorders && analysis != null && analysis.boundaryLines.length > 0) {
+                bl = analysis.boundaryLines;
+                bc = new float[bl.length];
+                for (int i = 0; i < bc.length; i += 3) { bc[i] = 1f; bc[i + 1] = 0.25f; bc[i + 2] = 0.25f; }
+            }
+            if (thickActive && thickRes != null && thickRes.minPoint != null) add(pts, ptc, thickRes.minPoint, new float[]{1f, 1f, 1f});
+            if (thickActive && thickPoint != null && comparePick != null) add(pts, ptc, comparePick, new float[]{1f, 0.84f, 0.2f});
+            if (bl == null && pts.isEmpty()) glView.renderer.clearOverlay();
+            else glView.renderer.setOverlay(arr(pts), arr(ptc), bl, bc);
             glView.requestRender();
             return;
         } else if (tool == TOOL_COMPARE && comparePick != null) {

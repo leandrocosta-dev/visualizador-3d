@@ -21,9 +21,11 @@ final class Fit {
         final float[] nrm;
         final int[] adjStart, adj;
         final boolean hasAdjacency;
+        /** Vértice da malha original → índice soldado. */
+        final int[] wid;
 
         Topology(Mesh m) {
-            int[] wid = MeshAnalysis.weld(m);
+            wid = MeshAnalysis.weld(m);
             int n = 0;
             for (int w : wid) if (w + 1 > n) n = w + 1;
             nu = n;

@@ -166,6 +166,72 @@ final class Deviation {
             return (s * sign >= 0) ? d : -d;
         }
 
+        /**
+         * Primeiro triângulo atingido pelo raio o + t·d (d unitário) com minT &lt; t &lt; maxT.
+         * Se exitOnly, aceita só triângulos cuja normal externa aponta no sentido do raio
+         * (o raio está saindo da peça pela parede oposta). Retorna t ou NaN.
+         */
+        double raycast(double ox, double oy, double oz, double dx, double dy, double dz,
+                       double minT, double maxT, boolean exitOnly) {
+            if (++query == Integer.MAX_VALUE) {
+                java.util.Arrays.fill(stamp, 0);
+                query = 1;
+            }
+            int ix = cx(ox), iy = cy(oy), iz = cz(oz);
+            int sx = dx > 0 ? 1 : -1, sy = dy > 0 ? 1 : -1, sz = dz > 0 ? 1 : -1;
+            double inf = Double.POSITIVE_INFINITY;
+            double tdx = dx != 0 ? h / Math.abs(dx) : inf;
+            double tdy = dy != 0 ? h / Math.abs(dy) : inf;
+            double tdz = dz != 0 ? h / Math.abs(dz) : inf;
+            double nbx = x0 + (ix + (sx > 0 ? 1 : 0)) * h;
+            double nby = y0 + (iy + (sy > 0 ? 1 : 0)) * h;
+            double nbz = z0 + (iz + (sz > 0 ? 1 : 0)) * h;
+            double tmx = dx != 0 ? Math.max(0, (nbx - ox) / dx) : inf;
+            double tmy = dy != 0 ? Math.max(0, (nby - oy) / dy) : inf;
+            double tmz = dz != 0 ? Math.max(0, (nbz - oz) / dz) : inf;
+            double best = Double.NaN;
+            for (int guard = 0; guard < nx + ny + nz + 3; guard++) {
+                int c = (iz * ny + iy) * nx + ix;
+                for (int k = cellStart[c]; k < cellStart[c + 1]; k++) {
+                    int ti = cellTris[k];
+                    if (stamp[ti] == query) continue;
+                    stamp[ti] = query;
+                    if (exitOnly) {
+                        double f = (fn[ti * 3] * dx + fn[ti * 3 + 1] * dy + fn[ti * 3 + 2] * dz) * sign;
+                        if (f <= 0) continue;
+                    }
+                    double t = rayTri(ti, ox, oy, oz, dx, dy, dz);
+                    if (t > minT && t < maxT && (Double.isNaN(best) || t < best)) best = t;
+                }
+                double exit = Math.min(tmx, Math.min(tmy, tmz));
+                if (!Double.isNaN(best) && best <= exit) return best;
+                if (exit > maxT) break;
+                if (tmx <= tmy && tmx <= tmz) { ix += sx; tmx += tdx; if (ix < 0 || ix >= nx) break; }
+                else if (tmy <= tmz) { iy += sy; tmy += tdy; if (iy < 0 || iy >= ny) break; }
+                else { iz += sz; tmz += tdz; if (iz < 0 || iz >= nz) break; }
+            }
+            return best;
+        }
+
+        /** Möller–Trumbore; retorna t (pode ser negativo) ou NaN se não intercepta. */
+        private double rayTri(int ti, double ox, double oy, double oz, double dx, double dy, double dz) {
+            int ia = tri[ti * 3] * 3, ib = tri[ti * 3 + 1] * 3, ic = tri[ti * 3 + 2] * 3;
+            double ax = p[ia], ay = p[ia + 1], az = p[ia + 2];
+            double e1x = p[ib] - ax, e1y = p[ib + 1] - ay, e1z = p[ib + 2] - az;
+            double e2x = p[ic] - ax, e2y = p[ic + 1] - ay, e2z = p[ic + 2] - az;
+            double px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x;
+            double det = e1x * px + e1y * py + e1z * pz;
+            if (det > -1e-20 && det < 1e-20) return Double.NaN;
+            double inv = 1.0 / det;
+            double tx = ox - ax, ty = oy - ay, tz = oz - az;
+            double u = (tx * px + ty * py + tz * pz) * inv;
+            if (u < 0 || u > 1) return Double.NaN;
+            double qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x;
+            double v = (dx * qx + dy * qy + dz * qz) * inv;
+            if (v < 0 || u + v > 1) return Double.NaN;
+            return (e2x * qx + e2y * qy + e2z * qz) * inv;
+        }
+
         /** Ericson, Real-Time Collision Detection, 5.1.5. Retorna a distância ao quadrado. */
         private double closestOnTri(int ti, double px, double py, double pz, double[] o) {
             int ia = tri[ti * 3] * 3, ib = tri[ti * 3 + 1] * 3, ic = tri[ti * 3 + 2] * 3;

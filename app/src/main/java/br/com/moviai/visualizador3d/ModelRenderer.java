@@ -138,6 +138,18 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
 
     private volatile CaptureCallback captureCallback;
 
+    interface FrameListener {
+        void onFrame(float[] mvp, int w, int h);
+    }
+
+    private volatile FrameListener frameListener;
+    /** MVP do último quadro desenhado (vale para a captura feita nesse quadro). */
+    volatile float[] lastMvp;
+
+    void setFrameListener(FrameListener l) {
+        frameListener = l;
+    }
+
     private final float[] mv = new float[16];
     private final float[] mvp = new float[16];
 
@@ -473,6 +485,18 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
             else drawMesh(gpuFull, m, curMode, curClip);
             if (drawRef && gpuRef.vbo[0] != 0) drawGhost(gpuRef, r, curClip);
             drawOverlay(oPts, oPtCol, oPtN, oLines, oLineCol, oLineN);
+        }
+
+        if (m != null) {
+            float[] snap = mvp.clone();
+            int fw, fh;
+            synchronized (this) {
+                fw = width;
+                fh = height;
+            }
+            lastMvp = snap;
+            FrameListener fl = frameListener;
+            if (fl != null) fl.onFrame(snap, fw, fh);
         }
 
         CaptureCallback cb = captureCallback;

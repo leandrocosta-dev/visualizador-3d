@@ -15,6 +15,7 @@ App nativo para visualizar malhas e nuvens de pontos `.stl` e `.ply` no celular.
 - Comparação scan × CAD: alinhamento automático (eixos principais + ICP) ou refino, mapa de cores de desvio com tolerância ajustável, estatísticas e desvio por ponto
 - Versão leve automática para girar malhas grandes com fluidez
 - Modo apresentação com giro automático
+- Realidade aumentada (ARCore): a peça em escala real sobre a mesa
 - Espessura de parede em mapa de cores, com espessura mínima e leitura por ponto
 - Orçamento de impressão 3D (FDM e resina) com parâmetros salvos e envio ao cliente
 - Anotações 3D numeradas presas à peça, na foto e no relatório

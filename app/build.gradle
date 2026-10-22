@@ -10,8 +10,8 @@ android {
         applicationId "br.com.moviai.visualizador3d"
         minSdk 24
         targetSdk 35
-        versionCode 7
-        versionName "6.0"
+        versionCode 8
+        versionName "7.0"
     }
 
     buildTypes {
@@ -26,4 +26,7 @@ android {
     }
 }
 
-// Sem dependências externas: usa apenas a API do Android e OpenGL ES 3.0.
+dependencies {
+    // Realidade aumentada (opcional no aparelho: o app funciona sem ela)
+    implementation 'com.google.ar:core:1.44.0'
+}

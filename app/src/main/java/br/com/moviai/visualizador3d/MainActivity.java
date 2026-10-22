@@ -613,7 +613,7 @@ public class MainActivity extends Activity {
         });
         Button fit = btn("Enquadrar", v -> { glView.renderer.resetView(); glView.requestRender(); });
         p.addView(row(orthoBtn, modeBtn, fit));
-        p.addView(row(btn("Modo apresentação", v -> setPresenting(true))));
+        p.addView(row(btn("Modo apresentação", v -> setPresenting(true)), btn("Ver em realidade aumentada", v -> openAr())));
         return p;
     }
 
@@ -2414,6 +2414,25 @@ public class MainActivity extends Activity {
         i.setType("text/plain");
         i.putExtra(Intent.EXTRA_TEXT, body);
         startActivity(Intent.createChooser(i, "Enviar orçamento"));
+    }
+
+    // ---------------------------------------------------------------- Realidade aumentada
+
+    private void openAr() {
+        Mesh m = current;
+        if (m == null) { toast("Abra um arquivo primeiro"); return; }
+        try {
+            com.google.ar.core.ArCoreApk.Availability av = com.google.ar.core.ArCoreApk.getInstance().checkAvailability(this);
+            if (av == com.google.ar.core.ArCoreApk.Availability.UNSUPPORTED_DEVICE_NOT_CAPABLE) {
+                toast("Este celular não é compatível com o ARCore do Google.");
+                return;
+            }
+        } catch (Exception ignored) {
+        }
+        // malhas grandes usam a versão leve para manter a fluidez da câmera
+        Mesh l = currentLite;
+        ArActivity.pending = l != null ? l : m;
+        startActivity(new Intent(this, ArActivity.class));
     }
 
     // ---------------------------------------------------------------- Apresentação

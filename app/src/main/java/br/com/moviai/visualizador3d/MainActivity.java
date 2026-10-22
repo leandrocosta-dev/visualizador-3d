@@ -80,8 +80,8 @@ public class MainActivity extends Activity {
     private Button orthoBtn, modeBtn;
 
     // Medir
-    private int measureMode = 0; // 0 distância, 1 diâmetro 3 pts, 2 plano, 3 cilindro, 4 esfera
-    private final Button[] modeBtns = new Button[5];
+    private int measureMode = 0; // 0 distância, 1 diâmetro 3 pts, 2 plano, 3 cilindro, 4 esfera, 5 face×face
+    private final Button[] modeBtns = new Button[6];
     // vetor da medição de distância: 0 livre, 1 X, 2 Y, 3 Z, 4 normal no 1º ponto, 5 do último ajuste
     private int distDir = 0;
     private static final String[] DIR_NAMES = {"Livre", "X", "Y", "Z", "Normal", "Ajuste"};
@@ -578,16 +578,18 @@ public class MainActivity extends Activity {
         LinearLayout p = panel();
         measureText = text();
         p.addView(measureText);
-        String[] names = {"Distância", "Ø 3 pts", "Plano", "Cilindro", "Esfera"};
+        String[] names = {"Distância", "Ø 3 pts", "Plano", "Cilindro", "Esfera", "Face×Face"};
         for (int i = 0; i < names.length; i++) {
             final int k = i;
             modeBtns[i] = btn(names[i], v -> {
+                if (k == 5 || measureMode == 5) fitPrev = fitCur = null;
                 measureMode = k;
                 mPicks.clear();
                 refreshMeasure();
             });
         }
-        p.addView(row(modeBtns));
+        p.addView(row(modeBtns[0], modeBtns[1], modeBtns[5]));
+        p.addView(row(modeBtns[2], modeBtns[3], modeBtns[4]));
         for (int i = 0; i < DIR_NAMES.length; i++) {
             final int k = i;
             dirBtns[i] = btn(DIR_NAMES[i], v -> {
@@ -637,7 +639,8 @@ public class MainActivity extends Activity {
             toast("Cilindro em nuvem de pontos precisa de normais no arquivo");
             return;
         }
-        final int type = measureMode - 2;
+        final int type = measureMode == 5 ? Fit.PLANE : measureMode - 2;
+        final boolean pair = measureMode == 5;
         final double frac = REGION_FRAC[regionSize];
         busy = true;
         progress.setVisibility(View.VISIBLE);
@@ -668,6 +671,7 @@ public class MainActivity extends Activity {
                 progress.setVisibility(View.GONE);
                 if (m != current) return;
                 if (fe != null) { toast(fe); refreshMeasure(); return; }
+                if (pair && fitPrev != null && fitCur != null) fitCur = null; // 3ª face recomeça o par
                 fitPrev = fitCur;
                 fitCur = fr;
                 refreshMeasure();
@@ -718,6 +722,46 @@ public class MainActivity extends Activity {
             case 5: return fitCur != null ? "no " + (fitCur.type == Fit.PLANE ? "vetor normal do plano" : "eixo do cilindro") : "";
             default: return "";
         }
+    }
+
+    /** Face × face: ângulo, distância perpendicular e variação ao longo da segunda face. */
+    private String describeFaces() {
+        if (fitCur == null) {
+            return "Toque a 1ª face plana (fica laranja) e depois a 2ª (fica verde). "
+                    + "A face inteira é reconhecida até as arestas vivas, então o ruído e a paralaxe não afetam.";
+        }
+        if (fitPrev == null) {
+            return "Face 1: planicidade " + f3(fitCur.extent) + " mm · " + String.format(BR, "%,d", fitCur.count)
+                    + " pts\nToque a 2ª face.";
+        }
+        Fit.Result a = fitPrev, b = fitCur;
+        double ang = Fit.angle(a, b);
+        double dAB = Math.abs(Align.dot(Align.sub(b.point, a.point), a.dir));
+        double dBA = Math.abs(Align.dot(Align.sub(a.point, b.point), b.dir));
+        double dist = (dAB + dBA) / 2;
+        double mn = Double.MAX_VALUE, mx = -Double.MAX_VALUE;
+        Fit.Topology t = topo;
+        if (t != null && b.region != null) {
+            for (int v : b.region) {
+                double dd = Math.abs((t.pos[v * 3] - a.point[0]) * a.dir[0] + (t.pos[v * 3 + 1] - a.point[1]) * a.dir[1]
+                        + (t.pos[v * 3 + 2] - a.point[2]) * a.dir[2]);
+                if (dd < mn) mn = dd;
+                if (dd > mx) mx = dd;
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        if (ang < 2) {
+            sb.append("Faces paralelas · distância ").append(f3(dist)).append(" mm")
+              .append(String.format(BR, " · ângulo %.2f°", ang));
+        } else if (Math.abs(ang - 90) < 2) {
+            sb.append("Faces perpendiculares · ").append(String.format(BR, "ângulo %.2f°", ang));
+        } else {
+            sb.append(String.format(BR, "Ângulo entre faces %.2f°", ang))
+              .append(" · distância no centro ").append(f3(dist)).append(" mm");
+        }
+        if (mn <= mx) sb.append("\nVariação ao longo da face 2: ").append(f3(mn)).append(" a ").append(f3(mx)).append(" mm");
+        sb.append("\nPlanicidade: face 1 ").append(f3(a.extent)).append(" · face 2 ").append(f3(b.extent)).append(" mm");
+        return sb.toString();
     }
 
     private String describeFit(Fit.Result r) {
@@ -773,6 +817,8 @@ public class MainActivity extends Activity {
                 if (c == null) s = "Os 3 pontos estão alinhados. Toque novamente.";
                 else s = "Ø " + f3(2 * c[3]) + " mm · raio " + f3(c[3]) + "\nCentro " + xyz(c);
             }
+        } else if (measureMode == 5) {
+            s = describeFaces();
         } else {
             if (fitCur == null) {
                 s = "Toque no meio da superfície (" + Fit.NAMES[measureMode - 2].toLowerCase(BR)
@@ -2004,6 +2050,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean hasMeasureResult() {
+        if (measureMode == 5) return fitPrev != null && fitCur != null;
         if (measureMode >= 2) return fitCur != null;
         return mPicks.size() >= (measureMode == 1 ? 3 : 2);
     }

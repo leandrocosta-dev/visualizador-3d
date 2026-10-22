@@ -1,5 +1,6 @@
 package br.com.moviai.visualizador3d;
 
+import android.graphics.Bitmap;
 import android.opengl.GLES30;
 import android.opengl.GLSurfaceView;
 import android.opengl.Matrix;
@@ -7,19 +8,34 @@ import android.util.Log;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
 
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
-/** Renderização OpenGL ES 3.0 com câmera orbital. */
+/** Renderização OpenGL ES 3.0: câmera orbital, perspectiva/ortográfica, plano de corte, marcadores e captura. */
 final class ModelRenderer implements GLSurfaceView.Renderer {
 
     static final int MODE_SOLID = 0;
     static final int MODE_WIRE = 1;
     static final int MODE_POINTS = 2;
 
+    /** Vistas padrão (Z para cima). Cada linha = eixo da tela (direita, cima, para o observador) em coordenadas da peça. */
+    static final float[][] VIEW_FRONT = {{1, 0, 0}, {0, 0, 1}, {0, -1, 0}};
+    static final float[][] VIEW_BACK = {{-1, 0, 0}, {0, 0, 1}, {0, 1, 0}};
+    static final float[][] VIEW_RIGHT = {{0, 1, 0}, {0, 0, 1}, {1, 0, 0}};
+    static final float[][] VIEW_LEFT = {{0, -1, 0}, {0, 0, 1}, {-1, 0, 0}};
+    static final float[][] VIEW_TOP = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    static final float[][] VIEW_BOTTOM = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+
+    interface CaptureCallback {
+        void onCaptured(Bitmap bmp);
+    }
+
     private static final String TAG = "Visualizador3D";
     private static final float FOV = 45f;
+    private static final float ORTHO_CAM = 10f;
 
     private static final String VS =
             "#version 300 es\n" +
@@ -31,23 +47,30 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
             "uniform float uPointSize;\n" +
             "out vec3 vNormal;\n" +
             "out vec3 vColor;\n" +
+            "out vec3 vPos;\n" +
             "void main(){\n" +
             "  gl_Position = uMVP * vec4(aPos, 1.0);\n" +
             "  vNormal = mat3(uMV) * aNormal;\n" +
             "  vColor = aColor;\n" +
+            "  vPos = aPos;\n" +
             "  gl_PointSize = uPointSize;\n" +
             "}\n";
 
-    // Luz de farol (vem da câmera) e iluminação dos dois lados, pois scans costumam ter normais invertidas.
+    // Luz de farol e iluminação dos dois lados. Com corte ativo, o interior (faces de trás) aparece em laranja.
     private static final String FS =
             "#version 300 es\n" +
             "precision highp float;\n" +
             "in vec3 vNormal;\n" +
             "in vec3 vColor;\n" +
+            "in vec3 vPos;\n" +
             "uniform int uLit;\n" +
+            "uniform int uClipOn;\n" +
+            "uniform vec4 uClip;\n" +
             "out vec4 fragColor;\n" +
             "void main(){\n" +
+            "  if (uClipOn == 1 && dot(vec4(vPos, 1.0), uClip) > 0.0) discard;\n" +
             "  vec3 c = vColor;\n" +
+            "  if (uClipOn == 1 && !gl_FrontFacing) c = vec3(0.95, 0.55, 0.20);\n" +
             "  if (uLit == 1) {\n" +
             "    float l = length(vNormal);\n" +
             "    float d = l > 1e-6 ? abs(vNormal.z / l) : 1.0;\n" +
@@ -57,7 +80,7 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
             "}\n";
 
     private int program;
-    private int uMVP, uMV, uPointSize, uLit;
+    private int uMVP, uMV, uPointSize, uLit, uClipOn, uClip;
 
     // buffers: 0 posição, 1 normal, 2 cor, 3 índices
     private final int[] vbo = new int[4];
@@ -69,18 +92,22 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
 
     private int mode = MODE_SOLID;
     private final float pointSizePx;
+    private final float markerSizePx;
 
     // estado da câmera (protegido por synchronized)
     private final float[] rot = new float[16];
     private float dist = 3f, panX = 0f, panY = 0f;
     private boolean fitPending = true;
+    private boolean ortho = false;
     private int width = 1, height = 1;
 
-    private final float[] proj = new float[16];
-    private final float[] view = new float[16];
-    private final float[] model = new float[16];
-    private final float[] tmp = new float[16];
-    private final float[] tmp2 = new float[16];
+    // corte e marcadores
+    private float[] clip = null;
+    private FloatBuffer ovPts, ovPtCol, ovLines, ovLineCol;
+    private int ovPtCount, ovLineCount;
+
+    private volatile CaptureCallback captureCallback;
+
     private final float[] mv = new float[16];
     private final float[] mvp = new float[16];
 
@@ -89,6 +116,7 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
 
     ModelRenderer(float density) {
         pointSizePx = Math.max(2f, 2.2f * density);
+        markerSizePx = 11f * density;
         resetRotation();
     }
 
@@ -97,7 +125,16 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
     synchronized void setMesh(Mesh m) {
         mesh = m;
         uploadPending = true;
+        clip = null;
+        clearOverlayLocked();
         resetRotation();
+        panX = panY = 0;
+        fitPending = true;
+    }
+
+    /** A malha foi transformada (alinhamento): reenvia para a GPU e reenquadra. */
+    synchronized void meshChanged() {
+        uploadPending = true;
         panX = panY = 0;
         fitPending = true;
     }
@@ -106,10 +143,64 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
         mode = m;
     }
 
+    synchronized void setOrtho(boolean o) {
+        ortho = o;
+    }
+
     synchronized void resetView() {
         resetRotation();
         panX = panY = 0;
         fitPending = true;
+    }
+
+    synchronized void setView(float[][] rows) {
+        Matrix.setIdentityM(rot, 0);
+        for (int i = 0; i < 3; i++) {
+            rot[i] = rows[i][0];
+            rot[4 + i] = rows[i][1];
+            rot[8 + i] = rows[i][2];
+        }
+        panX = panY = 0;
+        fitPending = true;
+    }
+
+    /** Plano (a,b,c,d) em coordenadas da peça; descarta onde a*x+b*y+c*z+d > 0. Null desliga. */
+    synchronized void setClip(float[] plane) {
+        clip = plane == null ? null : plane.clone();
+    }
+
+    synchronized float[] getClip() {
+        return clip == null ? null : clip.clone();
+    }
+
+    /** Marcadores em coordenadas da peça: pontos e segmentos (pares de pontos), com cor RGB por vértice. */
+    synchronized void setOverlay(float[] pts, float[] ptCol, float[] lines, float[] lineCol) {
+        ovPts = fb(pts);
+        ovPtCol = fb(ptCol);
+        ovLines = fb(lines);
+        ovLineCol = fb(lineCol);
+        ovPtCount = pts == null ? 0 : pts.length / 3;
+        ovLineCount = lines == null ? 0 : lines.length / 3;
+    }
+
+    synchronized void clearOverlay() {
+        clearOverlayLocked();
+    }
+
+    private void clearOverlayLocked() {
+        ovPts = ovPtCol = ovLines = ovLineCol = null;
+        ovPtCount = ovLineCount = 0;
+    }
+
+    void capture(CaptureCallback cb) {
+        captureCallback = cb;
+    }
+
+    private static FloatBuffer fb(float[] a) {
+        if (a == null || a.length == 0) return null;
+        FloatBuffer b = ByteBuffer.allocateDirect(a.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        b.put(a).position(0);
+        return b;
     }
 
     /** Vista isométrica, assumindo Z para cima (padrão CAD e scanner). */
@@ -123,9 +214,11 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
         float len = (float) Math.sqrt(dxPx * dxPx + dyPx * dyPx);
         if (len < 1e-3f) return;
         float deg = len * 200f / Math.min(width, height);
-        Matrix.setRotateM(tmp, 0, deg, dyPx / len, dxPx / len, 0f);
-        Matrix.multiplyMM(tmp2, 0, tmp, 0, rot, 0);
-        System.arraycopy(tmp2, 0, rot, 0, 16);
+        float[] r = new float[16];
+        float[] o = new float[16];
+        Matrix.setRotateM(r, 0, deg, dyPx / len, dxPx / len, 0f);
+        Matrix.multiplyMM(o, 0, r, 0, rot, 0);
+        System.arraycopy(o, 0, rot, 0, 16);
         orthonormalize();
     }
 
@@ -140,6 +233,43 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
         dist /= factor;
         if (dist < 0.02f) dist = 0.02f;
         if (dist > 200f) dist = 200f;
+    }
+
+    /** Matriz MVP atual e tamanho da tela, para o picking. out[16] e size[2]. */
+    synchronized boolean snapshot(Mesh m, float[] mvpOut, int[] size) {
+        if (m == null) return false;
+        computeLocked(m, mvpOut, new float[16]);
+        size[0] = width;
+        size[1] = height;
+        return true;
+    }
+
+    private void computeLocked(Mesh m, float[] mvpOut, float[] mvOut) {
+        float aspect = (float) width / height;
+        float t = (float) Math.tan(Math.toRadians(FOV / 2));
+        if (fitPending) {
+            dist = 1.15f / (t * Math.min(1f, aspect));
+            fitPending = false;
+        }
+        float[] proj = new float[16];
+        float[] view = new float[16];
+        float[] model = new float[16];
+        float[] tmp = new float[16];
+        if (ortho) {
+            float hh = dist * t;
+            Matrix.orthoM(proj, 0, -hh * aspect, hh * aspect, -hh, hh, 0.01f, ORTHO_CAM * 2f);
+        } else {
+            Matrix.perspectiveM(proj, 0, FOV, aspect, Math.max(0.001f, dist * 0.01f), dist + 10f);
+        }
+        Matrix.setIdentityM(view, 0);
+        Matrix.translateM(view, 0, panX, panY, ortho ? -ORTHO_CAM : -dist);
+        float s = 1f / m.radius;
+        Matrix.setIdentityM(model, 0);
+        Matrix.scaleM(model, 0, s, s, s);
+        Matrix.translateM(model, 0, -m.center[0], -m.center[1], -m.center[2]);
+        Matrix.multiplyMM(tmp, 0, rot, 0, model, 0);
+        Matrix.multiplyMM(mvOut, 0, view, 0, tmp, 0);
+        Matrix.multiplyMM(mvpOut, 0, proj, 0, mvOut, 0);
     }
 
     /** Evita acúmulo de erro numérico na matriz de rotação. */
@@ -165,6 +295,8 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
         uMV = GLES30.glGetUniformLocation(program, "uMV");
         uPointSize = GLES30.glGetUniformLocation(program, "uPointSize");
         uLit = GLES30.glGetUniformLocation(program, "uLit");
+        uClipOn = GLES30.glGetUniformLocation(program, "uClipOn");
+        uClip = GLES30.glGetUniformLocation(program, "uClip");
 
         GLES30.glEnable(GLES30.GL_DEPTH_TEST);
         GLES30.glDisable(GLES30.GL_CULL_FACE);
@@ -193,44 +325,50 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
         Mesh m;
         int curMode;
         boolean doUpload;
+        float[] curClip;
+        FloatBuffer oPts, oPtCol, oLines, oLineCol;
+        int oPtN, oLineN;
         synchronized (this) {
             m = mesh;
             curMode = mode;
             doUpload = uploadPending;
             uploadPending = false;
-            if (fitPending) {
-                float aspect = (float) width / height;
-                float t = (float) Math.tan(Math.toRadians(FOV / 2));
-                dist = 1.15f / (t * Math.min(1f, aspect));
-                fitPending = false;
-            }
-            float aspect = (float) width / height;
-            Matrix.perspectiveM(proj, 0, FOV, aspect, Math.max(0.001f, dist * 0.01f), dist + 10f);
-            Matrix.setIdentityM(view, 0);
-            Matrix.translateM(view, 0, panX, panY, -dist);
-            if (m != null) {
-                float s = 1f / m.radius;
-                Matrix.setIdentityM(model, 0);
-                Matrix.scaleM(model, 0, s, s, s);
-                Matrix.translateM(model, 0, -m.center[0], -m.center[1], -m.center[2]);
-                Matrix.multiplyMM(tmp, 0, rot, 0, model, 0);
-                Matrix.multiplyMM(mv, 0, view, 0, tmp, 0);
-                Matrix.multiplyMM(mvp, 0, proj, 0, mv, 0);
-            }
+            curClip = clip;
+            oPts = ovPts; oPtCol = ovPtCol; oLines = ovLines; oLineCol = ovLineCol;
+            oPtN = ovPtCount; oLineN = ovLineCount;
+            if (m != null) computeLocked(m, mvp, mv);
         }
 
         if (doUpload && m != null) upload(m);
 
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT | GLES30.GL_DEPTH_BUFFER_BIT);
-        if (m == null || vbo[0] == 0) return;
+        if (m != null && vbo[0] != 0) {
+            drawMesh(m, curMode, curClip);
+            drawOverlay(oPts, oPtCol, oPtN, oLines, oLineCol, oLineN);
+        }
 
+        CaptureCallback cb = captureCallback;
+        if (cb != null) {
+            captureCallback = null;
+            cb.onCaptured(readPixels());
+        }
+    }
+
+    private void drawMesh(Mesh m, int curMode, float[] curClip) {
         boolean points = m.pointCloud || curMode == MODE_POINTS;
         boolean wire = !points && curMode == MODE_WIRE;
 
+        GLES30.glEnable(GLES30.GL_DEPTH_TEST);
         GLES30.glUseProgram(program);
         GLES30.glUniformMatrix4fv(uMVP, 1, false, mvp, 0);
         GLES30.glUniformMatrix4fv(uMV, 1, false, mv, 0);
         GLES30.glUniform1f(uPointSize, pointSizePx);
+        if (curClip != null) {
+            GLES30.glUniform1i(uClipOn, 1);
+            GLES30.glUniform4f(uClip, curClip[0], curClip[1], curClip[2], curClip[3]);
+        } else {
+            GLES30.glUniform1i(uClipOn, 0);
+        }
 
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vbo[0]);
         GLES30.glEnableVertexAttribArray(0);
@@ -261,14 +399,72 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
             GLES30.glDrawArrays(GLES30.GL_POINTS, 0, m.vertexCount);
         } else if (wire) {
             if (lineIbo == 0) buildLines(m);
-            GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, lineIbo);
-            GLES30.glDrawElements(GLES30.GL_LINES, lineCount, GLES30.GL_UNSIGNED_INT, 0);
+            if (lineIbo != 0) {
+                GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, lineIbo);
+                GLES30.glDrawElements(GLES30.GL_LINES, lineCount, GLES30.GL_UNSIGNED_INT, 0);
+            }
         } else if (vbo[3] != 0) {
             GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, vbo[3]);
             GLES30.glDrawElements(GLES30.GL_TRIANGLES, m.indices.length, GLES30.GL_UNSIGNED_INT, 0);
         } else {
             GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, m.vertexCount);
         }
+        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0);
+        GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, 0);
+    }
+
+    /** Marcadores sempre visíveis (sem teste de profundidade), a partir de arrays do cliente. */
+    private void drawOverlay(FloatBuffer pts, FloatBuffer ptCol, int ptN,
+                             FloatBuffer lines, FloatBuffer lineCol, int lineN) {
+        if (ptN == 0 && lineN == 0) return;
+        GLES30.glDisable(GLES30.GL_DEPTH_TEST);
+        GLES30.glUniform1i(uLit, 0);
+        GLES30.glUniform1i(uClipOn, 0);
+        GLES30.glDisableVertexAttribArray(1);
+        GLES30.glVertexAttrib3f(1, 0f, 0f, 1f);
+        GLES30.glEnableVertexAttribArray(0);
+        GLES30.glEnableVertexAttribArray(2);
+
+        if (lineN > 0) {
+            GLES30.glLineWidth(3f);
+            GLES30.glVertexAttribPointer(0, 3, GLES30.GL_FLOAT, false, 0, lines);
+            GLES30.glVertexAttribPointer(2, 3, GLES30.GL_FLOAT, false, 0, lineCol);
+            GLES30.glDrawArrays(GLES30.GL_LINES, 0, lineN);
+        }
+        if (ptN > 0) {
+            GLES30.glUniform1f(uPointSize, markerSizePx);
+            GLES30.glVertexAttribPointer(0, 3, GLES30.GL_FLOAT, false, 0, pts);
+            GLES30.glVertexAttribPointer(2, 3, GLES30.GL_FLOAT, false, 0, ptCol);
+            GLES30.glDrawArrays(GLES30.GL_POINTS, 0, ptN);
+        }
+        GLES30.glDisableVertexAttribArray(2);
+        GLES30.glEnable(GLES30.GL_DEPTH_TEST);
+    }
+
+    private Bitmap readPixels() {
+        int w, h;
+        synchronized (this) {
+            w = width;
+            h = height;
+        }
+        IntBuffer buf = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder()).asIntBuffer();
+        GLES30.glPixelStorei(GLES30.GL_PACK_ALIGNMENT, 1);
+        GLES30.glReadPixels(0, 0, w, h, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf);
+        int[] src = new int[w * h];
+        buf.get(src);
+        int[] dst = new int[w * h];
+        boolean little = ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN;
+        for (int y = 0; y < h; y++) {
+            int so = y * w, d0 = (h - 1 - y) * w;
+            for (int x = 0; x < w; x++) {
+                int px = src[so + x];
+                int r, g, b;
+                if (little) { r = px & 0xFF; g = (px >> 8) & 0xFF; b = (px >> 16) & 0xFF; }
+                else { r = (px >>> 24) & 0xFF; g = (px >> 16) & 0xFF; b = (px >> 8) & 0xFF; }
+                dst[d0 + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
+            }
+        }
+        return Bitmap.createBitmap(dst, w, h, Bitmap.Config.ARGB_8888);
     }
 
     private void upload(Mesh m) {
@@ -297,6 +493,7 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
             uploadInts(GLES30.GL_ELEMENT_ARRAY_BUFFER, vbo[3], m.indices, m.indices.length);
         }
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0);
+        GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, 0);
     }
 
     /** Arestas geradas sob demanda só quando o modo arame é usado. */

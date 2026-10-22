@@ -12,8 +12,19 @@ import android.view.ScaleGestureDetector;
  *  2 dedos pinça      = zoom
  *  2 dedos arrastando = mover (pan)
  *  toque duplo        = reenquadrar
+ *  toque simples      = repassado ao TapListener (medir, alinhar)
  */
 final class ModelView extends GLSurfaceView {
+
+    interface TapListener {
+        void onTap(float x, float y);
+    }
+
+    private TapListener tapListener;
+
+    void setTapListener(TapListener l) {
+        tapListener = l;
+    }
 
     final ModelRenderer renderer;
     private final ScaleGestureDetector scaleDetector;
@@ -40,6 +51,12 @@ final class ModelView extends GLSurfaceView {
         });
 
         gestureDetector = new GestureDetector(ctx, new GestureDetector.SimpleOnGestureListener() {
+            @Override
+            public boolean onSingleTapConfirmed(MotionEvent e) {
+                if (tapListener != null) tapListener.onTap(e.getX(), e.getY());
+                return true;
+            }
+
             @Override
             public boolean onDoubleTap(MotionEvent e) {
                 renderer.resetView();

@@ -41,5 +41,11 @@
                 <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
+
+        <provider
+            android:name=".ShareProvider"
+            android:authorities="br.com.moviai.visualizador3d.share"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

@@ -47,7 +47,9 @@ public class MainActivity extends Activity {
     private static final int REQ_SAVE_PLY = 3;
     private static final Locale BR = new Locale("pt", "BR");
 
-    private static final int TOOL_NONE = -1, TOOL_VIEW = 0, TOOL_MEASURE = 1, TOOL_CUT = 2, TOOL_ALIGN = 3, TOOL_SAVE = 4;
+    private static final int TOOL_NONE = -1, TOOL_OPEN = 0, TOOL_VIEW = 1, TOOL_MEASURE = 2, TOOL_CUT = 3,
+            TOOL_ALIGN = 4, TOOL_ANALYZE = 5, TOOL_SAVE = 6;
+    private static final int MAX_RECENT = 10;
 
     private static final int C_BTN = 0xCC2E3B4E;
     private static final int C_SEL = 0xFF1E88E5;
@@ -60,11 +62,12 @@ public class MainActivity extends Activity {
     private ProgressBar progress;
     private LinearLayout bottom, toolbar;
     private ScrollView panelScroll;
-    private final View[] panels = new View[5];
-    private final Button[] toolButtons = new Button[5];
+    private final View[] panels = new View[7];
+    private final Button[] toolButtons = new Button[7];
     private int tool = TOOL_NONE;
 
     private Mesh current;
+    private volatile Mesh currentLite;
     private volatile int loadId = 0;
     private boolean busy = false;
 
@@ -99,6 +102,22 @@ public class MainActivity extends Activity {
 
     // Salvar
     private TextView saveText;
+
+    // Abrir
+    private LinearLayout recentList;
+
+    // Análise
+    private TextView analyzeText;
+    private MeshAnalysis analysis;
+    private boolean showBorders = true;
+    private int material = 0;
+    private static final String[] MAT_NAMES = {"PLA", "PETG", "ABS", "Resina", "Alumínio", "Aço"};
+    private static final double[] MAT_DENS = {1.24, 1.27, 1.04, 1.15, 2.70, 7.85};
+    private Button materialBtn, bordersBtn;
+
+    // Apresentação
+    private boolean presenting = false;
+    private TextView watermark;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -150,10 +169,12 @@ public class MainActivity extends Activity {
         lpPanel.setMargins(dp(8), 0, dp(8), dp(6));
         bottom.addView(panelScroll, lpPanel);
 
+        panels[TOOL_OPEN] = buildOpenPanel();
         panels[TOOL_VIEW] = buildViewPanel();
         panels[TOOL_MEASURE] = buildMeasurePanel();
         panels[TOOL_CUT] = buildCutPanel();
         panels[TOOL_ALIGN] = buildAlignPanel();
+        panels[TOOL_ANALYZE] = buildAnalyzePanel();
         panels[TOOL_SAVE] = buildSavePanel();
 
         HorizontalScrollView tbScroll = new HorizontalScrollView(this);
@@ -161,8 +182,7 @@ public class MainActivity extends Activity {
         toolbar = new LinearLayout(this);
         toolbar.setOrientation(LinearLayout.HORIZONTAL);
         toolbar.setPadding(dp(6), dp(4), dp(6), dp(8));
-        toolbar.addView(toolButton("Abrir", v -> openPicker()));
-        String[] names = {"Vista", "Medir", "Corte", "Alinhar", "Salvar"};
+        String[] names = {"Abrir", "Vista", "Medir", "Corte", "Alinhar", "Análise", "Salvar"};
         for (int i = 0; i < names.length; i++) {
             final int t = i;
             toolButtons[i] = toolButton(names[i], v -> selectTool(t));
@@ -173,6 +193,17 @@ public class MainActivity extends Activity {
 
         root.addView(bottom, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
+
+        watermark = new TextView(this);
+        watermark.setText("MoviAI Engenharia Digital");
+        watermark.setTextColor(0xB3FFFFFF);
+        watermark.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        watermark.setShadowLayer(4f, 0f, 1f, 0xFF000000);
+        watermark.setVisibility(View.GONE);
+        FrameLayout.LayoutParams lpWm = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.END);
+        lpWm.setMargins(dp(16), dp(16), dp(16), dp(28));
+        root.addView(watermark, lpWm);
 
         // Android 15 desenha atrás das barras do sistema: afasta os controles delas.
         root.setOnApplyWindowInsetsListener((v, insets) -> {
@@ -218,6 +249,10 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (presenting) {
+            setPresenting(false);
+            return;
+        }
         if (tool != TOOL_NONE) {
             selectTool(tool);
             return;
@@ -251,7 +286,15 @@ public class MainActivity extends Activity {
         super.onActivityResult(req, result, data);
         if (result != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
-        if (req == REQ_OPEN) load(uri);
+        if (req == REQ_OPEN) {
+            try {
+                getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Exception ignored) {
+                // nem todo provedor permite; o arquivo abre do mesmo jeito
+            }
+            if (tool == TOOL_OPEN) selectTool(TOOL_OPEN);
+            load(uri);
+        }
         else if (req == REQ_SAVE_STL) exportTo(uri, false);
         else if (req == REQ_SAVE_PLY) exportTo(uri, true);
     }
@@ -289,9 +332,26 @@ public class MainActivity extends Activity {
                     return in;
                 }, name, size);
                 long ms = SystemClock.elapsedRealtime() - t0;
+                final String fname = name;
+                currentLite = null;
                 runOnUiThread(() -> {
-                    if (id == loadId) showMesh(m, ms);
+                    if (id != loadId) return;
+                    showMesh(m, ms);
+                    addRecent(uri, fname);
                 });
+                if (Decimator.worthIt(m)) {
+                    try {
+                        Mesh l = Decimator.build(m);
+                        if (id == loadId) {
+                            currentLite = l;
+                            runOnUiThread(() -> {
+                                if (current == m) glView.renderer.setLite(m, l);
+                            });
+                        }
+                    } catch (OutOfMemoryError e) {
+                        currentLite = null;
+                    }
+                }
             } catch (OutOfMemoryError e) {
                 final String n = name;
                 runOnUiThread(() -> showError(n, "Arquivo grande demais para a memória do aparelho."));
@@ -313,6 +373,7 @@ public class MainActivity extends Activity {
         lockedAxis = null;
         lockedName = null;
         clipAxis = -1;
+        analysis = null;
         glView.renderer.setMesh(m);
         glView.requestRender();
         updateInfo(String.format(BR, "Carregado em %.1f s", ms / 1000f));
@@ -320,6 +381,7 @@ public class MainActivity extends Activity {
         refreshAlign();
         refreshClipButtons();
         refreshClipText();
+        refreshAnalysis();
     }
 
     private void showError(String name, String msg) {
@@ -354,6 +416,7 @@ public class MainActivity extends Activity {
         tool = (tool == t) ? TOOL_NONE : t;
         for (int i = 0; i < toolButtons.length; i++) setSel(toolButtons[i], i == tool);
         panelScroll.removeAllViews();
+        if (tool == TOOL_OPEN) refreshRecent();
         if (tool == TOOL_NONE) {
             panelScroll.setVisibility(View.GONE);
         } else {
@@ -365,6 +428,10 @@ public class MainActivity extends Activity {
     }
 
     private void onTap(float x, float y) {
+        if (presenting) {
+            setPresenting(false);
+            return;
+        }
         final Mesh m = current;
         if (m == null || busy) return;
         if (tool != TOOL_MEASURE && tool != TOOL_ALIGN) return;
@@ -421,6 +488,7 @@ public class MainActivity extends Activity {
         });
         Button fit = btn("Enquadrar", v -> { glView.renderer.resetView(); glView.requestRender(); });
         p.addView(row(orthoBtn, modeBtn, fit));
+        p.addView(row(btn("Modo apresentação", v -> setPresenting(true))));
         return p;
     }
 
@@ -709,6 +777,8 @@ public class MainActivity extends Activity {
         busy = true;
         worker.execute(() -> {
             m.applyTransform(inv);
+            Mesh l = currentLite;
+            if (l != null) l.applyTransform(inv);
             runOnUiThread(() -> afterTransform(m, null));
         });
     }
@@ -724,6 +794,8 @@ public class MainActivity extends Activity {
         busy = true;
         worker.execute(() -> {
             m.applyTransform(inv);
+            Mesh l = currentLite;
+            if (l != null) l.applyTransform(inv);
             runOnUiThread(() -> afterTransform(m, null));
         });
     }
@@ -744,6 +816,8 @@ public class MainActivity extends Activity {
             try {
                 applied = job.compute();
                 m.applyTransform(applied);
+                Mesh l = currentLite;
+                if (l != null) l.applyTransform(applied);
             } catch (Exception e) {
                 applied = null;
                 err = e.getMessage() != null ? e.getMessage() : e.toString();
@@ -770,6 +844,8 @@ public class MainActivity extends Activity {
         if (m != current) return;
         aPicks.clear();
         mPicks.clear();
+        analysis = null;
+        refreshAnalysis();
         glView.renderer.meshChanged();
         applyClip();
         updateInfo(note);
@@ -777,6 +853,161 @@ public class MainActivity extends Activity {
         refreshMeasure();
         refreshClipText();
         glView.requestRender();
+    }
+
+    // ---------------------------------------------------------------- Abrir
+
+    private View buildOpenPanel() {
+        LinearLayout p = panel();
+        p.addView(row(btn("Escolher arquivo...", v -> openPicker())));
+        p.addView(label("Recentes:"));
+        recentList = new LinearLayout(this);
+        recentList.setOrientation(LinearLayout.VERTICAL);
+        p.addView(recentList);
+        p.addView(row(btn("Limpar lista", v -> {
+            getSharedPreferences("recentes", MODE_PRIVATE).edit().clear().apply();
+            refreshRecent();
+        })));
+        return p;
+    }
+
+    private List<String[]> recents() {
+        List<String[]> out = new ArrayList<>();
+        String raw = getSharedPreferences("recentes", MODE_PRIVATE).getString("lista", "");
+        for (String line : raw.split("\n")) {
+            int tab = line.indexOf('\t');
+            if (tab > 0) out.add(new String[]{line.substring(0, tab), line.substring(tab + 1)});
+        }
+        return out;
+    }
+
+    private void addRecent(Uri uri, String name) {
+        String u = uri.toString();
+        List<String[]> list = recents();
+        StringBuilder sb = new StringBuilder();
+        sb.append(u).append('\t').append(name.replace('\n', ' ').replace('\t', ' '));
+        int n = 1;
+        for (String[] r : list) {
+            if (r[0].equals(u) || n >= MAX_RECENT) continue;
+            sb.append('\n').append(r[0]).append('\t').append(r[1]);
+            n++;
+        }
+        getSharedPreferences("recentes", MODE_PRIVATE).edit().putString("lista", sb.toString()).apply();
+    }
+
+    private void refreshRecent() {
+        if (recentList == null) return;
+        recentList.removeAllViews();
+        List<String[]> list = recents();
+        if (list.isEmpty()) {
+            TextView t = text();
+            t.setText("Nenhum arquivo aberto ainda.");
+            recentList.addView(t);
+            return;
+        }
+        for (String[] r : list) {
+            final Uri uri = Uri.parse(r[0]);
+            Button b = btn(r[1], v -> { selectTool(TOOL_OPEN); load(uri); });
+            b.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+            b.setPadding(dp(14), 0, dp(14), 0);
+            b.setSingleLine(true);
+            b.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+            recentList.addView(row(b));
+        }
+    }
+
+    // ---------------------------------------------------------------- Análise
+
+    private View buildAnalyzePanel() {
+        LinearLayout p = panel();
+        analyzeText = text();
+        p.addView(analyzeText);
+        bordersBtn = btn("Bordas: visíveis", v -> {
+            showBorders = !showBorders;
+            bordersBtn.setText(showBorders ? "Bordas: visíveis" : "Bordas: ocultas");
+            updateOverlay();
+        });
+        materialBtn = btn("Material: PLA", v -> {
+            material = (material + 1) % MAT_NAMES.length;
+            materialBtn.setText("Material: " + MAT_NAMES[material]);
+            refreshAnalysis();
+        });
+        p.addView(row(btn("Analisar", v -> runAnalysis()), bordersBtn, materialBtn));
+        refreshAnalysis();
+        return p;
+    }
+
+    private void runAnalysis() {
+        final Mesh m = current;
+        if (m == null) { toast("Abra um arquivo primeiro"); return; }
+        if (m.pointCloud) { toast("Nuvem de pontos não tem superfície para analisar"); return; }
+        if (busy) return;
+        busy = true;
+        progress.setVisibility(View.VISIBLE);
+        analyzeText.setText("Analisando...");
+        worker.execute(() -> {
+            MeshAnalysis a = null;
+            String err = null;
+            try {
+                a = MeshAnalysis.run(m);
+            } catch (OutOfMemoryError e) {
+                err = "Memória insuficiente para analisar esta malha.";
+            } catch (Exception e) {
+                err = e.toString();
+            }
+            final MeshAnalysis res = a;
+            final String msg = err;
+            runOnUiThread(() -> {
+                busy = false;
+                progress.setVisibility(View.GONE);
+                if (m != current) return;
+                if (res == null) { toast(msg); refreshAnalysis(); return; }
+                analysis = res;
+                refreshAnalysis();
+                updateOverlay();
+            });
+        });
+    }
+
+    private void refreshAnalysis() {
+        if (analyzeText == null) return;
+        MeshAnalysis a = analysis;
+        if (a == null) {
+            analyzeText.setText("Verifica se a malha está fechada (pronta para impressão ou CAD), mostra furos e bordas abertas em vermelho, ilhas soltas, área, volume e massa estimada.");
+            return;
+        }
+        StringBuilder s = new StringBuilder();
+        s.append(a.closed ? "✔ Malha fechada (estanque)" : "✖ Malha aberta").append('\n');
+        s.append("Área: ").append(f2(a.area)).append(" mm² (").append(f2(a.area / 100.0)).append(" cm²)\n");
+        if (a.closed) {
+            double cm3 = a.volume / 1000.0;
+            s.append("Volume: ").append(f2(cm3)).append(" cm³\n");
+            s.append("Massa em ").append(MAT_NAMES[material]).append(" maciço: ")
+             .append(f2(cm3 * MAT_DENS[material])).append(" g\n");
+        } else {
+            s.append("Volume: não confiável com a malha aberta (≈ ").append(f2(a.volume / 1000.0)).append(" cm³)\n");
+        }
+        s.append("Bordas abertas: ").append(String.format(BR, "%,d", a.boundaryEdges));
+        if (a.holes > 0) s.append(" em ").append(a.holes).append(a.holes == 1 ? " contorno (furo)" : " contornos (furos)");
+        s.append('\n');
+        s.append("Ilhas (partes separadas): ").append(a.shells).append('\n');
+        if (a.nonManifoldEdges > 0) s.append("Arestas não manifold: ").append(String.format(BR, "%,d", a.nonManifoldEdges)).append('\n');
+        if (a.degenerate > 0) s.append("Triângulos degenerados: ").append(String.format(BR, "%,d", a.degenerate)).append('\n');
+        if (a.inverted) s.append("Normais invertidas (malha de dentro para fora)\n");
+        if (a.boundaryEdges > MeshAnalysis.MAX_OVERLAY_EDGES) s.append("Exibindo as primeiras ").append(String.format(BR, "%,d", MeshAnalysis.MAX_OVERLAY_EDGES)).append(" bordas.\n");
+        analyzeText.setText(s.toString().trim());
+    }
+
+    // ---------------------------------------------------------------- Apresentação
+
+    private void setPresenting(boolean on) {
+        presenting = on;
+        if (on && tool != TOOL_NONE) selectTool(tool);
+        bottom.setVisibility(on ? View.GONE : View.VISIBLE);
+        info.setVisibility(on || current == null ? View.GONE : View.VISIBLE);
+        watermark.setVisibility(on ? View.VISIBLE : View.GONE);
+        glView.setPresenting(on);
+        if (on) toast("Toque na tela para sair");
     }
 
     // ---------------------------------------------------------------- Salvar
@@ -941,6 +1172,13 @@ public class MainActivity extends Activity {
             if (diameterMode && mPicks.size() >= 3) {
                 circleLines(mPicks.get(0).p, mPicks.get(1).p, mPicks.get(2).p, ln, lnc, cyan, pts, ptc);
             }
+        } else if (tool == TOOL_ANALYZE && showBorders && analysis != null && analysis.boundaryLines.length > 0) {
+            float[] bl = analysis.boundaryLines;
+            float[] bc = new float[bl.length];
+            for (int i = 0; i < bc.length; i += 3) { bc[i] = 1f; bc[i + 1] = 0.25f; bc[i + 2] = 0.25f; }
+            glView.renderer.setOverlay(null, null, bl, bc);
+            glView.requestRender();
+            return;
         } else if (tool == TOOL_ALIGN) {
             for (Picker.Hit h : aPicks) add(pts, ptc, h.p, magenta);
             if (edgeMode && aPicks.size() >= 2) {

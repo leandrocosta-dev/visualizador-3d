@@ -66,6 +66,12 @@ final class ModelView extends GLSurfaceView {
         });
     }
 
+    void setPresenting(boolean on) {
+        renderer.setSpinning(on);
+        setRenderMode(on ? RENDERMODE_CONTINUOUSLY : RENDERMODE_WHEN_DIRTY);
+        requestRender();
+    }
+
     void setMesh(Mesh m) {
         renderer.setMesh(m);
         requestRender();
@@ -97,6 +103,9 @@ final class ModelView extends GLSurfaceView {
 
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
+                renderer.setInteracting(true);
+                lastCount = -1;
+                break;
             case MotionEvent.ACTION_POINTER_DOWN:
             case MotionEvent.ACTION_POINTER_UP:
                 lastCount = -1; // recomeça a referência para não dar "pulo"
@@ -117,6 +126,8 @@ final class ModelView extends GLSurfaceView {
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL:
                 lastCount = -1;
+                renderer.setInteracting(false);
+                requestRender(); // volta a desenhar a malha completa
                 break;
             default:
                 break;

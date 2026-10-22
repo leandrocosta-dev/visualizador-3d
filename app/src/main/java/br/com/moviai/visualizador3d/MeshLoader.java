@@ -26,6 +26,8 @@ final class MeshLoader {
         Mesh m;
         if (headTxt.startsWith("ply") || (lower.endsWith(".ply") && !looksLikeStl(head, size))) {
             m = loadPly(src);
+        } else if (lower.endsWith(".obj") || looksLikeObj(head)) {
+            m = loadObj(src);
         } else {
             m = loadStl(src, head, size);
         }
@@ -54,6 +56,90 @@ final class MeshLoader {
         }
         String t = new String(head, StandardCharsets.US_ASCII).trim().toLowerCase(Locale.ROOT);
         return t.startsWith("solid") && t.contains("facet");
+    }
+
+    private static boolean looksLikeObj(byte[] head) {
+        if (hasBinaryBytes(head) || head.length == 0) return false;
+        String t = new String(head, StandardCharsets.US_ASCII);
+        if (t.trim().toLowerCase(Locale.ROOT).startsWith("solid")) return false;
+        return t.startsWith("v ") || t.contains("\nv ") || t.startsWith("#") || t.startsWith("mtllib") || t.startsWith("o ");
+    }
+
+    // ------------------------------------------------------------------ OBJ
+
+    /** OBJ: v (com cor opcional "v x y z r g b"), f com polígonos e índices v, v/vt, v//vn, v/vt/vn ou negativos. */
+    private static Mesh loadObj(Source src) throws IOException {
+        FloatList pos = new FloatList(1 << 16);
+        FloatList col = null;
+        IntList faces = new IntList(1 << 16);
+        int[] tmp = new int[32];
+        try (InputStream in = src.open()) {
+            BinReader r = new BinReader(in);
+            String line;
+            while ((line = r.readLine()) != null) {
+                int len = line.length();
+                int i = 0;
+                while (i < len && line.charAt(i) <= ' ') i++;
+                if (i + 1 >= len) continue;
+                char c0 = line.charAt(i), c1 = line.charAt(i + 1);
+                if (c0 == 'v' && c1 <= ' ') {
+                    String[] t = line.substring(i + 2).trim().split("\\s+");
+                    if (t.length < 3) continue;
+                    pos.add(Float.parseFloat(t[0]));
+                    pos.add(Float.parseFloat(t[1]));
+                    pos.add(Float.parseFloat(t[2]));
+                    if (t.length >= 6) {
+                        if (col == null) {
+                            col = new FloatList(pos.data.length);
+                            for (int k = 0; k < pos.size - 3; k++) col.add(0.74f);
+                        }
+                        col.add(Float.parseFloat(t[3]));
+                        col.add(Float.parseFloat(t[4]));
+                        col.add(Float.parseFloat(t[5]));
+                    } else if (col != null) {
+                        col.add(0.74f); col.add(0.74f); col.add(0.74f);
+                    }
+                } else if (c0 == 'f' && c1 <= ' ') {
+                    String[] t = line.substring(i + 2).trim().split("\\s+");
+                    int nv = pos.size / 3;
+                    int n = 0;
+                    for (String tok : t) {
+                        if (tok.isEmpty()) continue;
+                        int sl = tok.indexOf('/');
+                        int v = Integer.parseInt(sl < 0 ? tok : tok.substring(0, sl));
+                        v = v < 0 ? nv + v : v - 1;
+                        if (n == tmp.length) tmp = Arrays.copyOf(tmp, n * 2);
+                        tmp[n++] = v;
+                    }
+                    for (int k = 1; k + 1 < n; k++) faces.add3(tmp[0], tmp[k], tmp[k + 1]);
+                }
+            }
+        }
+        int nv = pos.size / 3;
+        if (nv == 0) throw new IOException("OBJ sem vértices");
+        Mesh m = new Mesh();
+        m.positions = Arrays.copyOf(pos.data, nv * 3);
+        m.vertexCount = nv;
+        if (col != null) {
+            boolean scale255 = false;
+            for (int k = 0; k < Math.min(col.size, 3000); k++) if (col.data[k] > 1.001f) { scale255 = true; break; }
+            m.colors = new byte[nv * 3];
+            for (int k = 0; k < nv * 3 && k < col.size; k++) {
+                float v = scale255 ? col.data[k] : col.data[k] * 255f;
+                m.colors[k] = (byte) Math.max(0, Math.min(255, Math.round(v)));
+            }
+        }
+        int[] idx = validTriangles(faces, nv);
+        if (idx.length == 0) {
+            m.pointCloud = true;
+            m.format = "OBJ (nuvem de pontos)";
+        } else {
+            m.indices = idx;
+            m.triangleCount = idx.length / 3;
+            m.format = "OBJ";
+            m.computeSmoothNormals();
+        }
+        return m;
     }
 
     /** STL ASCII só tem texto; qualquer byte de controle após o cabeçalho indica binário. */

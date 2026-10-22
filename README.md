@@ -4,13 +4,16 @@ App nativo para visualizar malhas e nuvens de pontos `.stl` e `.ply` no celular.
 
 ## Recursos
 
-- STL binário e ASCII
-- PLY ASCII, binário little endian e big endian (malha ou nuvem de pontos, com normais e cores por vértice)
-- Modos de exibição: Sólido, Arame e Pontos
-- Gestos: 1 dedo gira, pinça dá zoom, 2 dedos movem, toque duplo reenquadra
-- Mostra nome, formato, número de vértices e triângulos e as dimensões X, Y, Z (na unidade do arquivo, geralmente mm)
-- Abre arquivos direto do gerenciador de arquivos, Drive ou WhatsApp ("Abrir com" ou "Compartilhar")
-- Sem dependências externas, OpenGL ES 3.0, Android 7.0 ou superior
+- Formatos: STL (binário e ASCII), PLY (ASCII e binário, malha ou nuvem de pontos com normais e cores) e OBJ
+- Arquivos recentes
+- Vistas padrão (Iso, Frente, Topo, Direita, Esquerda, Trás, Baixo), perspectiva ou ortográfica, modos Sólido, Arame e Pontos
+- Medição de distância (com ΔX, ΔY, ΔZ) e de diâmetro por 3 pontos
+- Plano de corte em X, Y ou Z
+- Alinhamento XYZ: automático, por face plana, por aresta, giro fino e definição de origem; exporta a malha alinhada
+- Análise: malha fechada ou aberta, bordas e furos em vermelho, ilhas, área, volume e massa estimada por material
+- Versão leve automática para girar malhas grandes com fluidez
+- Modo apresentação com giro automático
+- Foto da tela com rodapé e envio de STL por WhatsApp
 
 ## Como gerar o APK
 

@@ -36,6 +36,8 @@
                 <data android:mimeType="application/sla" />
                 <data android:mimeType="application/vnd.ms-pki.stl" />
                 <data android:mimeType="application/x-ply" />
+                <data android:mimeType="model/obj" />
+                <data android:mimeType="application/x-tgif" />
                 <data android:mimeType="model/x-ply" />
                 <data android:mimeType="text/plain" />
                 <data android:mimeType="application/octet-stream" />

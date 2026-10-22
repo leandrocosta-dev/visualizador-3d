@@ -82,13 +82,38 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
     private int program;
     private int uMVP, uMV, uPointSize, uLit, uClipOn, uClip;
 
-    // buffers: 0 posição, 1 normal, 2 cor, 3 índices
-    private final int[] vbo = new int[4];
-    private int lineIbo = 0;
-    private int lineCount = 0;
+    /** Buffers de GPU de uma malha: 0 posição, 1 normal, 2 cor, 3 índices, mais arestas do modo arame. */
+    private static final class Gpu {
+        final int[] vbo = new int[4];
+        int lineIbo = 0;
+        int lineCount = 0;
+
+        void forget() {
+            vbo[0] = vbo[1] = vbo[2] = vbo[3] = 0;
+            lineIbo = 0;
+            lineCount = 0;
+        }
+
+        void delete() {
+            int[] old = {vbo[0], vbo[1], vbo[2], vbo[3], lineIbo};
+            for (int id : old) if (id != 0) GLES30.glDeleteBuffers(1, new int[]{id}, 0);
+            forget();
+        }
+    }
+
+    private final Gpu gpuFull = new Gpu();
+    private final Gpu gpuLite = new Gpu();
 
     private Mesh mesh;
+    private Mesh lite;
     private boolean uploadPending = false;
+    private boolean liteUploadPending = false;
+    private boolean interacting = false;
+
+    // apresentação: giro contínuo em torno de Z
+    private boolean spinning = false;
+    private long lastSpinNs = 0;
+    private float spinDegPerSec = 24f;
 
     private int mode = MODE_SOLID;
     private final float pointSizePx;
@@ -124,6 +149,8 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
 
     synchronized void setMesh(Mesh m) {
         mesh = m;
+        lite = null;
+        liteUploadPending = true;
         uploadPending = true;
         clip = null;
         clearOverlayLocked();
@@ -132,9 +159,26 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
         fitPending = true;
     }
 
+    /** Versão leve (ou null) usada enquanto o usuário gira a peça. */
+    synchronized void setLite(Mesh full, Mesh l) {
+        if (full != mesh) return;
+        lite = l;
+        liteUploadPending = true;
+    }
+
+    synchronized void setInteracting(boolean on) {
+        interacting = on;
+    }
+
+    synchronized void setSpinning(boolean on) {
+        spinning = on;
+        lastSpinNs = 0;
+    }
+
     /** A malha foi transformada (alinhamento): reenvia para a GPU e reenquadra. */
     synchronized void meshChanged() {
         uploadPending = true;
+        liteUploadPending = true;
         panX = panY = 0;
         fitPending = true;
     }
@@ -303,11 +347,11 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
         GLES30.glClearColor(0.11f, 0.13f, 0.16f, 1f);
 
         // contexto novo: buffers antigos não existem mais
-        vbo[0] = vbo[1] = vbo[2] = vbo[3] = 0;
-        lineIbo = 0;
-        lineCount = 0;
+        gpuFull.forget();
+        gpuLite.forget();
         synchronized (this) {
             if (mesh != null) uploadPending = true;
+            if (lite != null) liteUploadPending = true;
         }
     }
 
@@ -322,28 +366,45 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
 
     @Override
     public void onDrawFrame(GL10 unused) {
-        Mesh m;
+        Mesh m, l;
         int curMode;
-        boolean doUpload;
+        boolean doUpload, doLite, useLite;
         float[] curClip;
         FloatBuffer oPts, oPtCol, oLines, oLineCol;
         int oPtN, oLineN;
         synchronized (this) {
             m = mesh;
+            l = lite;
             curMode = mode;
             doUpload = uploadPending;
             uploadPending = false;
+            doLite = liteUploadPending;
+            liteUploadPending = false;
+            if (spinning) {
+                long now = System.nanoTime();
+                if (lastSpinNs != 0) {
+                    float dt = Math.min(0.1f, (now - lastSpinNs) / 1e9f);
+                    Matrix.rotateM(rot, 0, spinDegPerSec * dt, 0f, 0f, 1f);
+                }
+                lastSpinNs = now;
+            }
+            useLite = (interacting || spinning) && l != null;
             curClip = clip;
             oPts = ovPts; oPtCol = ovPtCol; oLines = ovLines; oLineCol = ovLineCol;
             oPtN = ovPtCount; oLineN = ovLineCount;
             if (m != null) computeLocked(m, mvp, mv);
         }
 
-        if (doUpload && m != null) upload(m);
+        if (doUpload && m != null) upload(gpuFull, m);
+        if (doLite) {
+            gpuLite.delete();
+            if (l != null) upload(gpuLite, l);
+        }
 
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT | GLES30.GL_DEPTH_BUFFER_BIT);
-        if (m != null && vbo[0] != 0) {
-            drawMesh(m, curMode, curClip);
+        if (m != null && gpuFull.vbo[0] != 0) {
+            if (useLite && gpuLite.vbo[0] != 0) drawMesh(gpuLite, l, curMode, curClip);
+            else drawMesh(gpuFull, m, curMode, curClip);
             drawOverlay(oPts, oPtCol, oPtN, oLines, oLineCol, oLineN);
         }
 
@@ -354,7 +415,8 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
         }
     }
 
-    private void drawMesh(Mesh m, int curMode, float[] curClip) {
+    private void drawMesh(Gpu g, Mesh m, int curMode, float[] curClip) {
+        int[] vbo = g.vbo;
         boolean points = m.pointCloud || curMode == MODE_POINTS;
         boolean wire = !points && curMode == MODE_WIRE;
 
@@ -398,10 +460,10 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
         if (points) {
             GLES30.glDrawArrays(GLES30.GL_POINTS, 0, m.vertexCount);
         } else if (wire) {
-            if (lineIbo == 0) buildLines(m);
-            if (lineIbo != 0) {
-                GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, lineIbo);
-                GLES30.glDrawElements(GLES30.GL_LINES, lineCount, GLES30.GL_UNSIGNED_INT, 0);
+            if (g.lineIbo == 0) buildLines(g, m);
+            if (g.lineIbo != 0) {
+                GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, g.lineIbo);
+                GLES30.glDrawElements(GLES30.GL_LINES, g.lineCount, GLES30.GL_UNSIGNED_INT, 0);
             }
         } else if (vbo[3] != 0) {
             GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, vbo[3]);
@@ -467,14 +529,9 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
         return Bitmap.createBitmap(dst, w, h, Bitmap.Config.ARGB_8888);
     }
 
-    private void upload(Mesh m) {
-        int[] old = {vbo[0], vbo[1], vbo[2], vbo[3], lineIbo};
-        for (int id : old) {
-            if (id != 0) GLES30.glDeleteBuffers(1, new int[]{id}, 0);
-        }
-        vbo[0] = vbo[1] = vbo[2] = vbo[3] = 0;
-        lineIbo = 0;
-        lineCount = 0;
+    private void upload(Gpu g, Mesh m) {
+        g.delete();
+        int[] vbo = g.vbo;
 
         if (staging == null) staging = ByteBuffer.allocateDirect(STAGING_BYTES).order(ByteOrder.nativeOrder());
 
@@ -497,7 +554,7 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
     }
 
     /** Arestas geradas sob demanda só quando o modo arame é usado. */
-    private void buildLines(Mesh m) {
+    private void buildLines(Gpu g, Mesh m) {
         int tris = m.indices != null ? m.indices.length / 3 : m.vertexCount / 3;
         int[] lines;
         try {
@@ -518,9 +575,9 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
             lines[o + 2] = b; lines[o + 3] = c;
             lines[o + 4] = c; lines[o + 5] = a;
         }
-        lineIbo = genBuffer();
-        uploadInts(GLES30.GL_ELEMENT_ARRAY_BUFFER, lineIbo, lines, lines.length);
-        lineCount = lines.length;
+        g.lineIbo = genBuffer();
+        uploadInts(GLES30.GL_ELEMENT_ARRAY_BUFFER, g.lineIbo, lines, lines.length);
+        g.lineCount = lines.length;
     }
 
     private static int genBuffer() {

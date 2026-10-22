@@ -82,6 +82,13 @@ public class MainActivity extends Activity {
     // Medir
     private int measureMode = 0; // 0 distância, 1 diâmetro 3 pts, 2 plano, 3 cilindro, 4 esfera
     private final Button[] modeBtns = new Button[5];
+    // vetor da medição de distância: 0 livre, 1 X, 2 Y, 3 Z, 4 normal no 1º ponto, 5 do último ajuste
+    private int distDir = 0;
+    private static final String[] DIR_NAMES = {"Livre", "X", "Y", "Z", "Normal", "Ajuste"};
+    private final Button[] dirBtns = new Button[6];
+    private LinearLayout dirRow;
+    private double[] normalDir;
+    private Picker.Hit normalFor;
     private int regionSize = 1;
     private static final String[] REGION_NAMES = {"Região: pequena", "Região: média", "Região: grande"};
     private static final double[] REGION_FRAC = {0.03, 0.10, 0.35};
@@ -581,6 +588,24 @@ public class MainActivity extends Activity {
             });
         }
         p.addView(row(modeBtns));
+        for (int i = 0; i < DIR_NAMES.length; i++) {
+            final int k = i;
+            dirBtns[i] = btn(DIR_NAMES[i], v -> {
+                if (k == 5 && (fitCur == null || fitCur.dir == null)) {
+                    toast("Ajuste antes um plano ou cilindro (modos Plano/Cilindro)");
+                    return;
+                }
+                distDir = k;
+                ensureNormal();
+                refreshMeasure();
+            });
+        }
+        TextView dl = label("Medir na direção:");
+        dirRow = new LinearLayout(this);
+        dirRow.setOrientation(LinearLayout.VERTICAL);
+        dirRow.addView(dl);
+        dirRow.addView(row(dirBtns));
+        p.addView(dirRow);
         regionBtn = btn(REGION_NAMES[regionSize], v -> {
             regionSize = (regionSize + 1) % REGION_NAMES.length;
             regionBtn.setText(REGION_NAMES[regionSize]);
@@ -601,6 +626,7 @@ public class MainActivity extends Activity {
         int need = measureMode == 1 ? 3 : 2;
         if (mPicks.size() >= need) mPicks.clear();
         mPicks.add(h);
+        if (measureMode == 0) ensureNormal();
         refreshMeasure();
     }
 
@@ -649,6 +675,51 @@ public class MainActivity extends Activity {
         });
     }
 
+    /** Calcula (em segundo plano) a normal da superfície no 1º ponto, por plano ajustado na vizinhança. */
+    private void ensureNormal() {
+        if (distDir != 4 || mPicks.isEmpty()) return;
+        final Picker.Hit h = mPicks.get(0);
+        if (normalFor == h && normalDir != null) return;
+        final Mesh m = current;
+        if (m == null) return;
+        normalFor = h;
+        normalDir = null;
+        worker.execute(() -> {
+            float dx = m.max[0] - m.min[0], dy = m.max[1] - m.min[1], dz = m.max[2] - m.min[2];
+            double diag = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            List<Picker.Hit> one = new ArrayList<>();
+            one.add(h);
+            double[] n = Align.fitPlaneNormal(m, one, Math.max(diag * 0.012, 1e-6));
+            runOnUiThread(() -> {
+                if (normalFor != h || m != current) return;
+                normalDir = n;
+                if (n == null) toast("Não foi possível obter a normal nesse ponto");
+                refreshMeasure();
+            });
+        });
+    }
+
+    /** Vetor unitário da medição atual, ou null se livre / indisponível. */
+    private double[] measureDir() {
+        switch (distDir) {
+            case 1: return new double[]{1, 0, 0};
+            case 2: return new double[]{0, 1, 0};
+            case 3: return new double[]{0, 0, 1};
+            case 4: return normalDir;
+            case 5: return fitCur != null && fitCur.dir != null ? fitCur.dir : null;
+            default: return null;
+        }
+    }
+
+    private String dirLabel() {
+        switch (distDir) {
+            case 1: case 2: case 3: return "em " + DIR_NAMES[distDir];
+            case 4: return "na normal do 1º ponto";
+            case 5: return fitCur != null ? "no " + (fitCur.type == Fit.PLANE ? "vetor normal do plano" : "eixo do cilindro") : "";
+            default: return "";
+        }
+    }
+
     private String describeFit(Fit.Result r) {
         switch (r.type) {
             case Fit.CYLINDER:
@@ -667,6 +738,9 @@ public class MainActivity extends Activity {
         if (measureText == null) return;
         for (int i = 0; i < modeBtns.length; i++) setSel(modeBtns[i], i == measureMode);
         regionBtn.setVisibility(measureMode >= 2 ? View.VISIBLE : View.INVISIBLE);
+        if (distDir == 5 && (fitCur == null || fitCur.dir == null)) distDir = 0;
+        dirRow.setVisibility(measureMode == 0 ? View.VISIBLE : View.GONE);
+        for (int i = 0; i < dirBtns.length; i++) setSel(dirBtns[i], i == distDir);
         int n = mPicks.size();
         String s;
         if (measureMode == 0) {
@@ -676,7 +750,20 @@ public class MainActivity extends Activity {
                 double[] a = mPicks.get(0).p, b = mPicks.get(1).p;
                 double dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
                 double d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-                s = "Distância: " + f3(d) + " mm\nΔX " + f3(Math.abs(dx)) + " · ΔY " + f3(Math.abs(dy)) + " · ΔZ " + f3(Math.abs(dz));
+                double[] dir = measureDir();
+                if (distDir == 0) {
+                    s = "Distância: " + f3(d) + " mm\nΔX " + f3(Math.abs(dx)) + " · ΔY " + f3(Math.abs(dy)) + " · ΔZ " + f3(Math.abs(dz));
+                } else if (dir == null) {
+                    s = "Calculando a normal no 1º ponto...";
+                } else {
+                    double proj = Math.abs(dx * dir[0] + dy * dir[1] + dz * dir[2]);
+                    double lat = Math.sqrt(Math.max(0, d * d - proj * proj));
+                    s = "Distância " + dirLabel() + ": " + f3(proj) + " mm\n3D " + f3(d)
+                            + " · desalinhamento lateral " + f3(lat) + " mm";
+                    if (distDir == 4 || distDir == 5) {
+                        s += String.format(BR, "\nVetor (%.3f; %.3f; %.3f)", dir[0], dir[1], dir[2]);
+                    }
+                }
             }
         } else if (measureMode == 1) {
             if (n < 3) {
@@ -1973,8 +2060,22 @@ public class MainActivity extends Activity {
         if (tool == TOOL_MEASURE) {
             for (Picker.Hit h : mPicks) add(pts, ptc, h.p, yellow);
             if (measureMode == 0 && mPicks.size() >= 2) {
-                add(ln, lnc, mPicks.get(0).p, yellow);
-                add(ln, lnc, mPicks.get(1).p, yellow);
+                double[] a = mPicks.get(0).p, b = mPicks.get(1).p;
+                double[] dir = measureDir();
+                if (distDir == 0 || dir == null) {
+                    add(ln, lnc, a, yellow);
+                    add(ln, lnc, b, yellow);
+                } else {
+                    float[] gray = {0.6f, 0.62f, 0.66f};
+                    double t = (b[0] - a[0]) * dir[0] + (b[1] - a[1]) * dir[1] + (b[2] - a[2]) * dir[2];
+                    double[] f = {a[0] + dir[0] * t, a[1] + dir[1] * t, a[2] + dir[2] * t};
+                    add(ln, lnc, a, gray);
+                    add(ln, lnc, b, gray);
+                    add(ln, lnc, f, gray);
+                    add(ln, lnc, b, gray);
+                    add(ln, lnc, a, yellow);
+                    add(ln, lnc, f, yellow);
+                }
             }
             if (measureMode == 1 && mPicks.size() >= 3) {
                 circleLines(mPicks.get(0).p, mPicks.get(1).p, mPicks.get(2).p, ln, lnc, cyan, pts, ptc);

@@ -187,6 +187,35 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
         liteUploadPending = true;
     }
 
+    private float[] clearColor = {0.11f, 0.13f, 0.16f};
+
+    /** Cor de fundo (o relatório usa fundo claro nas capturas). */
+    synchronized void setBackground(float r, float g, float b) {
+        clearColor = new float[]{r, g, b};
+    }
+
+    synchronized void setDefaultBackground() {
+        clearColor = new float[]{0.11f, 0.13f, 0.16f};
+    }
+
+    /** Estado da câmera para restaurar depois (rotação, distância, deslocamento). */
+    synchronized float[] saveCamera() {
+        float[] s = new float[19];
+        System.arraycopy(rot, 0, s, 0, 16);
+        s[16] = dist;
+        s[17] = panX;
+        s[18] = panY;
+        return s;
+    }
+
+    synchronized void restoreCamera(float[] s) {
+        System.arraycopy(s, 0, rot, 0, 16);
+        dist = s[16];
+        panX = s[17];
+        panY = s[18];
+        fitPending = false;
+    }
+
     synchronized void setInteracting(boolean on) {
         interacting = on;
     }
@@ -433,6 +462,11 @@ final class ModelRenderer implements GLSurfaceView.Renderer {
             if (r != null) upload(gpuRef, r);
         }
 
+        float[] cc;
+        synchronized (this) {
+            cc = clearColor;
+        }
+        GLES30.glClearColor(cc[0], cc[1], cc[2], 1f);
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT | GLES30.GL_DEPTH_BUFFER_BIT);
         if (m != null && gpuFull.vbo[0] != 0) {
             if (useLite && gpuLite.vbo[0] != 0) drawMesh(gpuLite, l, curMode, curClip);

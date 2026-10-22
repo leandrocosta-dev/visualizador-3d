@@ -46,6 +46,8 @@ public class MainActivity extends Activity {
     private static final int REQ_SAVE_STL = 2;
     private static final int REQ_SAVE_PLY = 3;
     private static final int REQ_OPEN_REF = 4;
+    private static final int REQ_SAVE_DXF = 5;
+    private static final int REQ_SAVE_PDF = 6;
     private static final Locale BR = new Locale("pt", "BR");
 
     private static final int TOOL_NONE = -1, TOOL_OPEN = 0, TOOL_VIEW = 1, TOOL_MEASURE = 2, TOOL_CUT = 3,
@@ -78,7 +80,29 @@ public class MainActivity extends Activity {
     private Button orthoBtn, modeBtn;
 
     // Medir
-    private boolean diameterMode = false;
+    private int measureMode = 0; // 0 distância, 1 diâmetro 3 pts, 2 plano, 3 cilindro, 4 esfera
+    private final Button[] modeBtns = new Button[5];
+    private int regionSize = 1;
+    private static final String[] REGION_NAMES = {"Região: pequena", "Região: média", "Região: grande"};
+    private static final double[] REGION_FRAC = {0.03, 0.10, 0.35};
+    private Button regionBtn;
+    private Fit.Topology topo;
+    private volatile Mesh topoMesh;
+    private Fit.Result fitPrev, fitCur;
+
+    // Perfil 2D
+    private FrameLayout sectionOverlay;
+    private SectionView sectionView;
+    private TextView sectionText;
+    private Section curSection;
+    private final List<double[]> secPicks = new ArrayList<>();
+    private boolean secRadius = false;
+    private Button secDistBtn, secRadBtn;
+
+    // Relatório
+    private final ArrayList<String> reportItems = new ArrayList<>();
+    private Button itemsBtn;
+    private Uri pendingPdfUri;
     private final List<Picker.Hit> mPicks = new ArrayList<>();
     private TextView measureText;
     private Button distBtn, diamBtn;
@@ -225,6 +249,9 @@ public class MainActivity extends Activity {
         lpWm.setMargins(dp(16), dp(16), dp(16), dp(28));
         root.addView(watermark, lpWm);
 
+        root.addView(buildSectionOverlay(), new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
         // Android 15 desenha atrás das barras do sistema: afasta os controles delas.
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             int top = insets.getSystemWindowInsetTop();
@@ -235,6 +262,7 @@ public class MainActivity extends Activity {
             lp.setMargins(dp(10) + left, dp(10) + top, dp(10) + right, dp(10));
             info.setLayoutParams(lp);
             bottom.setPadding(left, 0, right, bot);
+            sectionOverlay.setPadding(left, top, right, bot);
             return insets;
         });
 
@@ -269,6 +297,10 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (sectionOverlay != null && sectionOverlay.getVisibility() == View.VISIBLE) {
+            sectionOverlay.setVisibility(View.GONE);
+            return;
+        }
         if (presenting) {
             setPresenting(false);
             return;
@@ -316,6 +348,8 @@ public class MainActivity extends Activity {
             load(uri);
         }
         else if (req == REQ_OPEN_REF) loadReference(uri);
+        else if (req == REQ_SAVE_DXF) saveDxf(uri);
+        else if (req == REQ_SAVE_PDF) startReport(uri);
         else if (req == REQ_SAVE_STL) exportTo(uri, false);
         else if (req == REQ_SAVE_PLY) exportTo(uri, true);
     }
@@ -402,6 +436,9 @@ public class MainActivity extends Activity {
         alignInfo = null;
         pointInfo = null;
         comparePick = null;
+        fitPrev = fitCur = null;
+        topoMesh = null;
+        topo = null;
         glView.renderer.setMesh(m);
         glView.requestRender();
         updateInfo(String.format(BR, "Carregado em %.1f s", ms / 1000f));
@@ -534,48 +571,184 @@ public class MainActivity extends Activity {
         LinearLayout p = panel();
         measureText = text();
         p.addView(measureText);
-        distBtn = btn("Distância", v -> { diameterMode = false; mPicks.clear(); refreshMeasure(); });
-        diamBtn = btn("Diâmetro", v -> { diameterMode = true; mPicks.clear(); refreshMeasure(); });
-        Button clear = btn("Limpar", v -> { mPicks.clear(); refreshMeasure(); });
-        p.addView(row(distBtn, diamBtn, clear));
+        String[] names = {"Distância", "Ø 3 pts", "Plano", "Cilindro", "Esfera"};
+        for (int i = 0; i < names.length; i++) {
+            final int k = i;
+            modeBtns[i] = btn(names[i], v -> {
+                measureMode = k;
+                mPicks.clear();
+                refreshMeasure();
+            });
+        }
+        p.addView(row(modeBtns));
+        regionBtn = btn(REGION_NAMES[regionSize], v -> {
+            regionSize = (regionSize + 1) % REGION_NAMES.length;
+            regionBtn.setText(REGION_NAMES[regionSize]);
+        });
+        p.addView(row(regionBtn,
+                btn("Limpar", v -> { mPicks.clear(); fitPrev = fitCur = null; refreshMeasure(); }),
+                btn("+ Relatório", v -> addMeasureToReport())));
+        p.addView(row(btn("Eixo/normal → +Z", v -> fitAxisToZ()), btn("Origem aqui", v -> fitOrigin())));
         refreshMeasure();
         return p;
     }
 
     private void addMeasurePick(Picker.Hit h) {
-        int need = diameterMode ? 3 : 2;
+        if (measureMode >= 2) {
+            runFit(h);
+            return;
+        }
+        int need = measureMode == 1 ? 3 : 2;
         if (mPicks.size() >= need) mPicks.clear();
         mPicks.add(h);
         refreshMeasure();
     }
 
+    private void runFit(Picker.Hit h) {
+        final Mesh m = current;
+        if (m == null || busy) return;
+        if (m.pointCloud && m.normals == null && measureMode == 3) {
+            toast("Cilindro em nuvem de pontos precisa de normais no arquivo");
+            return;
+        }
+        final int type = measureMode - 2;
+        final double frac = REGION_FRAC[regionSize];
+        busy = true;
+        progress.setVisibility(View.VISIBLE);
+        measureText.setText("Ajustando " + Fit.NAMES[type].toLowerCase(BR) + "...");
+        worker.execute(() -> {
+            Fit.Result r = null;
+            String err = null;
+            try {
+                if (topoMesh != m) {
+                    topo = new Fit.Topology(m);
+                    topoMesh = m;
+                }
+                float dx = m.max[0] - m.min[0], dy = m.max[1] - m.min[1], dz = m.max[2] - m.min[2];
+                double diag = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                int seed = topo.nearest(h.p);
+                int[] reg = Fit.grow(topo, seed, frac * diag, 15, type == Fit.PLANE ? 12 : 0);
+                r = Fit.fit(topo, reg, type);
+                if (r == null) err = "Não foi possível ajustar. Toque no meio da superfície ou aumente a região.";
+            } catch (OutOfMemoryError e) {
+                err = "Memória insuficiente";
+            } catch (Exception e) {
+                err = e.toString();
+            }
+            final Fit.Result fr = r;
+            final String fe = err;
+            runOnUiThread(() -> {
+                busy = false;
+                progress.setVisibility(View.GONE);
+                if (m != current) return;
+                if (fe != null) { toast(fe); refreshMeasure(); return; }
+                fitPrev = fitCur;
+                fitCur = fr;
+                refreshMeasure();
+            });
+        });
+    }
+
+    private String describeFit(Fit.Result r) {
+        switch (r.type) {
+            case Fit.CYLINDER:
+                return String.format(BR, "Cilindro Ø %.3f mm (raio %.3f)\nEixo (%.3f; %.3f; %.3f) · altura %.2f · RMS %.3f · %,d pts",
+                        2 * r.radius, r.radius, r.dir[0], r.dir[1], r.dir[2], r.extent, r.rms, r.count);
+            case Fit.SPHERE:
+                return String.format(BR, "Esfera Ø %.3f mm (raio %.3f)\nCentro %s · RMS %.3f · %,d pts",
+                        2 * r.radius, r.radius, xyz(r.point), r.rms, r.count);
+            default:
+                return String.format(BR, "Plano: planicidade %.3f mm · RMS %.3f\nNormal (%.3f; %.3f; %.3f) · %,d pts",
+                        r.extent, r.rms, r.dir[0], r.dir[1], r.dir[2], r.count);
+        }
+    }
+
     private void refreshMeasure() {
         if (measureText == null) return;
-        setSel(distBtn, !diameterMode);
-        setSel(diamBtn, diameterMode);
+        for (int i = 0; i < modeBtns.length; i++) setSel(modeBtns[i], i == measureMode);
+        regionBtn.setVisibility(measureMode >= 2 ? View.VISIBLE : View.INVISIBLE);
         int n = mPicks.size();
         String s;
-        if (!diameterMode) {
+        if (measureMode == 0) {
             if (n < 2) {
-                s = n == 0 ? "Toque o primeiro ponto na peça." : "Toque o segundo ponto.";
-                if (n == 1) s = "Ponto 1: " + xyz(mPicks.get(0).p) + "\nToque o segundo ponto.";
+                s = n == 0 ? "Toque o primeiro ponto na peça." : "Ponto 1: " + xyz(mPicks.get(0).p) + "\nToque o segundo ponto.";
             } else {
                 double[] a = mPicks.get(0).p, b = mPicks.get(1).p;
                 double dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
                 double d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-                s = "Distância: " + f2(d) + " mm\nΔX " + f2(Math.abs(dx)) + " · ΔY " + f2(Math.abs(dy)) + " · ΔZ " + f2(Math.abs(dz));
+                s = "Distância: " + f3(d) + " mm\nΔX " + f3(Math.abs(dx)) + " · ΔY " + f3(Math.abs(dy)) + " · ΔZ " + f3(Math.abs(dz));
             }
-        } else {
+        } else if (measureMode == 1) {
             if (n < 3) {
                 s = "Toque 3 pontos na borda do furo ou do arco (" + n + " de 3).";
             } else {
                 double[] c = Align.circle(mPicks.get(0).p, mPicks.get(1).p, mPicks.get(2).p);
                 if (c == null) s = "Os 3 pontos estão alinhados. Toque novamente.";
-                else s = "Ø " + f2(2 * c[3]) + " mm · raio " + f2(c[3]) + "\nCentro " + xyz(c);
+                else s = "Ø " + f3(2 * c[3]) + " mm · raio " + f3(c[3]) + "\nCentro " + xyz(c);
+            }
+        } else {
+            if (fitCur == null) {
+                s = "Toque no meio da superfície (" + Fit.NAMES[measureMode - 2].toLowerCase(BR)
+                        + "). A região cresce até as arestas vivas, limitada pelo tamanho escolhido.";
+            } else {
+                s = describeFit(fitCur);
+                if (fitPrev != null) {
+                    double ang = Fit.angle(fitPrev, fitCur);
+                    double dist = Fit.distance(fitPrev, fitCur);
+                    s += "\nEm relação ao anterior (" + Fit.NAMES[fitPrev.type] + "):";
+                    if (!Double.isNaN(ang)) s += String.format(BR, " ângulo %.2f°", ang);
+                    s += String.format(BR, " · distância %.3f mm", dist);
+                }
             }
         }
         measureText.setText(s);
         updateOverlay();
+    }
+
+    private void addMeasureToReport() {
+        if (!hasMeasureResult()) { toast("Faça uma medição primeiro"); return; }
+        addReportItem(measureText.getText().toString());
+    }
+
+    private void addReportItem(String s) {
+        reportItems.add(s.replace("\n", " · "));
+        toast("Adicionado ao relatório (" + reportItems.size() + ")");
+        refreshItemsBtn();
+    }
+
+    private void fitAxisToZ() {
+        final Fit.Result r = fitCur;
+        if (r == null || r.dir == null) { toast("Ajuste um plano ou cilindro primeiro"); return; }
+        runTransform(() -> Mat4.about(Mat4.rotationBetween(r.dir, new double[]{0, 0, 1}),
+                r.point[0], r.point[1], r.point[2]), null);
+    }
+
+    private void fitOrigin() {
+        final Fit.Result r = fitCur;
+        if (r == null) { toast("Ajuste uma primitiva primeiro"); return; }
+        runTransform(() -> Mat4.translation(-r.point[0], -r.point[1], -r.point[2]), null);
+    }
+
+    private void fitOverlay(Fit.Result r, float[] col, List<Float> pts, List<Float> ptc, List<Float> ln, List<Float> lnc) {
+        Fit.Topology t = topo;
+        if (r == null || t == null || topoMesh != current) return;
+        int step = Math.max(1, r.region.length / 3000);
+        for (int i = 0; i < r.region.length; i += step) {
+            int v = r.region[i];
+            add(pts, ptc, new double[]{t.pos[v * 3], t.pos[v * 3 + 1], t.pos[v * 3 + 2]}, col);
+        }
+        if (r.type == Fit.CYLINDER) {
+            double h = Math.max(r.extent / 2, r.radius);
+            double[] a = {r.point[0] - r.dir[0] * h, r.point[1] - r.dir[1] * h, r.point[2] - r.dir[2] * h};
+            double[] b = {r.point[0] + r.dir[0] * h, r.point[1] + r.dir[1] * h, r.point[2] + r.dir[2] * h};
+            add(ln, lnc, a, col);
+            add(ln, lnc, b, col);
+        } else if (r.type == Fit.PLANE) {
+            double len = Math.max(current.radius * 0.15, 1e-3);
+            add(ln, lnc, r.point, col);
+            add(ln, lnc, new double[]{r.point[0] + r.dir[0] * len, r.point[1] + r.dir[1] * len, r.point[2] + r.dir[2] * len}, col);
+        }
+        add(pts, ptc, r.point, new float[]{1f, 1f, 1f});
     }
 
     // ---------------------------------------------------------------- Corte
@@ -609,6 +782,7 @@ public class MainActivity extends Activity {
             public void onStopTrackingTouch(SeekBar s) {}
         });
         p.addView(clipSeek);
+        p.addView(row(btn("Perfil 2D (medir e DXF)", v -> openSection())));
         refreshClipButtons();
         refreshClipText();
         return p;
@@ -876,6 +1050,8 @@ public class MainActivity extends Activity {
         clearDeviation();
         pointInfo = null;
         comparePick = null;
+        fitPrev = fitCur = null;
+        topoMesh = null;
         refreshCompare();
         aPicks.clear();
         mPicks.clear();
@@ -1047,6 +1223,11 @@ public class MainActivity extends Activity {
         });
         p.addView(row(btn("Abrir CAD...", v -> openReferencePicker()), showRefBtn));
         p.addView(row(btn("Alinhar automático", v -> icpAlign(false)), btn("Refinar", v -> icpAlign(true))));
+        p.addView(row(btn("+ Relatório", v -> {
+            if (pointInfo != null) addReportItem("Comparação · " + pointInfo);
+            else if (devActive) addReportItem(deviationSummary());
+            else toast("Calcule os desvios ou toque num ponto");
+        })));
         p.addView(row(btn("Calcular desvios", v -> computeDeviation()), btn("Limpar mapa", v -> {
             clearDeviation();
             pointInfo = null;
@@ -1277,6 +1458,337 @@ public class MainActivity extends Activity {
         compareText.setText(s.toString());
     }
 
+    // ---------------------------------------------------------------- Perfil 2D
+
+    private View buildSectionOverlay() {
+        sectionOverlay = new FrameLayout(this);
+        sectionOverlay.setBackgroundColor(0xFF12161C);
+        sectionOverlay.setVisibility(View.GONE);
+        sectionOverlay.setClickable(true);
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        sectionText = text();
+        sectionText.setPadding(dp(12), dp(10), dp(12), dp(6));
+        col.addView(sectionText);
+        sectionView = new SectionView(this);
+        sectionView.setTapListener(this::onSectionTap);
+        col.addView(sectionView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        LinearLayout bar = panel();
+        secDistBtn = btn("Distância", v -> { secRadius = false; secPicks.clear(); refreshSection(); });
+        secRadBtn = btn("Raio 3 pts", v -> { secRadius = true; secPicks.clear(); refreshSection(); });
+        bar.addView(row(secDistBtn, secRadBtn,
+                btn("Limpar", v -> { secPicks.clear(); refreshSection(); }),
+                btn("+ Relatório", v -> {
+                    if (secPicks.size() >= (secRadius ? 3 : 2)) addReportItem(sectionHeader() + " · " + sectionMeasure());
+                    else toast("Faça uma medição no perfil primeiro");
+                })));
+        bar.addView(row(
+                btn("Salvar DXF...", v -> {
+                    if (curSection == null) return;
+                    Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                    i.addCategory(Intent.CATEGORY_OPENABLE);
+                    i.setType("application/dxf");
+                    i.putExtra(Intent.EXTRA_TITLE, dxfName());
+                    startActivityForResult(i, REQ_SAVE_DXF);
+                }),
+                btn("Enviar DXF", v -> shareDxf()),
+                btn("Fechar", v -> sectionOverlay.setVisibility(View.GONE))));
+        col.addView(bar);
+        sectionOverlay.addView(col, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        return sectionOverlay;
+    }
+
+    private void openSection() {
+        final Mesh m = current;
+        if (m == null) { toast("Abra um arquivo primeiro"); return; }
+        if (m.pointCloud) { toast("Nuvem de pontos não tem superfície para cortar"); return; }
+        if (clipAxis < 0) { toast("Escolha o eixo do corte (X, Y ou Z) primeiro"); return; }
+        if (busy) return;
+        final int axis = clipAxis;
+        final double pos = m.min[axis] + clipFrac * (m.max[axis] - m.min[axis]);
+        busy = true;
+        progress.setVisibility(View.VISIBLE);
+        worker.execute(() -> {
+            Section sec = null;
+            String err = null;
+            try {
+                sec = Section.slice(m, axis, pos);
+            } catch (OutOfMemoryError e) {
+                err = "Memória insuficiente";
+            } catch (Exception e) {
+                err = e.toString();
+            }
+            final Section fs = sec;
+            final String fe = err;
+            runOnUiThread(() -> {
+                busy = false;
+                progress.setVisibility(View.GONE);
+                if (fe != null) { toast(fe); return; }
+                if (fs.polylines.isEmpty()) { toast("O plano não corta a peça nessa posição"); return; }
+                curSection = fs;
+                secPicks.clear();
+                sectionView.setSection(fs);
+                sectionOverlay.setVisibility(View.VISIBLE);
+                refreshSection();
+            });
+        });
+    }
+
+    private void onSectionTap(double u, double v, double tol) {
+        if (curSection == null) return;
+        double[] n = curSection.nearest(u, v);
+        if (n[2] > tol) { toast("Toque mais perto do contorno"); return; }
+        int need = secRadius ? 3 : 2;
+        if (secPicks.size() >= need) secPicks.clear();
+        secPicks.add(new double[]{n[0], n[1]});
+        refreshSection();
+    }
+
+    private String sectionHeader() {
+        Section s = curSection;
+        return "Seção em " + Section.axisName(s.axis) + " = " + f2(s.value) + " mm";
+    }
+
+    private String sectionMeasure() {
+        Section s = curSection;
+        String un = Section.axisName(s.uAxis), vn = Section.axisName(s.vAxis);
+        if (!secRadius) {
+            double[] a = secPicks.get(0), b = secPicks.get(1);
+            double du = b[0] - a[0], dv = b[1] - a[1];
+            return "Distância " + f3(Math.hypot(du, dv)) + " mm (Δ" + un + " " + f3(Math.abs(du)) + " · Δ" + vn + " " + f3(Math.abs(dv)) + ")";
+        }
+        double[] c = Align.circle(new double[]{secPicks.get(0)[0], secPicks.get(0)[1], 0},
+                new double[]{secPicks.get(1)[0], secPicks.get(1)[1], 0},
+                new double[]{secPicks.get(2)[0], secPicks.get(2)[1], 0});
+        if (c == null) return "pontos alinhados";
+        return "Raio " + f3(c[3]) + " mm (Ø " + f3(2 * c[3]) + ") · centro " + un + " " + f3(c[0]) + " · " + vn + " " + f3(c[1]);
+    }
+
+    private void refreshSection() {
+        Section s = curSection;
+        if (s == null) return;
+        setSel(secDistBtn, !secRadius);
+        setSel(secRadBtn, secRadius);
+        int closedCount = 0;
+        for (boolean b : s.closed) if (b) closedCount++;
+        StringBuilder t = new StringBuilder(sectionHeader());
+        t.append(String.format(BR, " · %d contorno%s (%d fechado%s) · %,d pontos",
+                s.polylines.size(), s.polylines.size() == 1 ? "" : "s", closedCount, closedCount == 1 ? "" : "s", s.pointCount()));
+        int need = secRadius ? 3 : 2;
+        if (secPicks.size() >= need) t.append('\n').append(sectionMeasure());
+        else t.append('\n').append(secRadius ? "Toque 3 pontos no arco (" : "Toque 2 pontos no contorno (")
+              .append(secPicks.size()).append(" de ").append(need).append("). Pinça: zoom · toque duplo: enquadrar.");
+        sectionText.setText(t.toString());
+        sectionView.setMarks(secPicks, secRadius);
+    }
+
+    private String dxfName() {
+        Section s = curSection;
+        return baseName() + "_secao_" + Section.axisName(s.axis) + String.format(java.util.Locale.US, "%.2f", s.value).replace('.', '_').replace('-', 'm') + ".dxf";
+    }
+
+    private void saveDxf(Uri uri) {
+        final Section s = curSection;
+        if (s == null) return;
+        final ContentResolver cr = getContentResolver();
+        worker.execute(() -> {
+            String msg;
+            try (OutputStream os = cr.openOutputStream(uri, "wt")) {
+                if (os == null) throw new java.io.IOException("Destino inválido");
+                s.writeDxf(os);
+                msg = "DXF salvo";
+            } catch (Exception e) {
+                msg = "Erro ao salvar: " + e.getMessage();
+            }
+            final String fm = msg;
+            runOnUiThread(() -> toast(fm));
+        });
+    }
+
+    private void shareDxf() {
+        final Section s = curSection;
+        if (s == null) return;
+        final String name = dxfName();
+        worker.execute(() -> {
+            try {
+                File f = freshShareFile(name);
+                try (OutputStream os = new FileOutputStream(f)) {
+                    s.writeDxf(os);
+                }
+                runOnUiThread(() -> share(f, "application/dxf", "Enviar DXF"));
+            } catch (Exception e) {
+                runOnUiThread(() -> toast("Erro: " + e.getMessage()));
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------- Relatório
+
+    private void refreshItemsBtn() {
+        if (itemsBtn != null) itemsBtn.setText("Itens: " + reportItems.size() + " · limpar");
+    }
+
+    private void showReportDialog(Runnable after) {
+        final android.content.SharedPreferences sp = getSharedPreferences("relatorio", MODE_PRIVATE);
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.VERTICAL);
+        l.setPadding(dp(20), dp(8), dp(20), 0);
+        final android.widget.EditText cli = field(l, "Cliente", sp.getString("cliente", ""));
+        final android.widget.EditText pec = field(l, "Peça / ordem de serviço", sp.getString("peca", ""));
+        final android.widget.EditText res = field(l, "Responsável técnico (nome e CREA)", sp.getString("responsavel", ""));
+        final android.widget.EditText obs = field(l, "Observações", sp.getString("obs", ""));
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Dados do relatório")
+                .setView(l)
+                .setPositiveButton(after == null ? "Salvar" : "Gerar PDF", (d, w) -> {
+                    sp.edit().putString("cliente", cli.getText().toString().trim())
+                            .putString("peca", pec.getText().toString().trim())
+                            .putString("responsavel", res.getText().toString().trim())
+                            .putString("obs", obs.getText().toString().trim())
+                            .putBoolean("definido", true).apply();
+                    if (after != null) after.run();
+                })
+                .setNegativeButton("Cancelar", null)
+                .show();
+    }
+
+    private android.widget.EditText field(LinearLayout l, String hint, String value) {
+        TextView lab = label(hint);
+        l.addView(lab);
+        android.widget.EditText e = new android.widget.EditText(this);
+        e.setText(value);
+        e.setSingleLine(!hint.startsWith("Observ"));
+        l.addView(e);
+        return e;
+    }
+
+    /** Gera o PDF. target null = compartilhar; senão grava no arquivo escolhido. */
+    private void startReport(Uri target) {
+        if (current == null) { toast("Abra um arquivo primeiro"); return; }
+        if (busy) return;
+        if (!getSharedPreferences("relatorio", MODE_PRIVATE).getBoolean("definido", false)) {
+            showReportDialog(() -> startReport(target));
+            return;
+        }
+        pendingPdfUri = target;
+        busy = true;
+        progress.setVisibility(View.VISIBLE);
+        toast("Gerando relatório...");
+        if (tool != TOOL_NONE && tool != TOOL_MEASURE && tool != TOOL_COMPARE) selectTool(tool);
+        final float[] cam = glView.renderer.saveCamera();
+        glView.renderer.setBackground(0.96f, 0.97f, 0.98f);
+        final Object[] views = {null, "ISO", ModelRenderer.VIEW_FRONT, ModelRenderer.VIEW_TOP};
+        final List<Bitmap> imgs = new ArrayList<>();
+        captureChain(views, 0, imgs, () -> {
+            glView.renderer.restoreCamera(cam);
+            glView.renderer.setDefaultBackground();
+            glView.requestRender();
+            buildPdf(imgs);
+        });
+    }
+
+    private void captureChain(Object[] views, int i, List<Bitmap> out, Runnable done) {
+        if (i >= views.length) { done.run(); return; }
+        Object v = views[i];
+        if ("ISO".equals(v)) glView.renderer.resetView();
+        else if (v instanceof float[][]) glView.renderer.setView((float[][]) v);
+        glView.renderer.capture(bmp -> runOnUiThread(() -> {
+            int w = bmp.getWidth(), h = bmp.getHeight();
+            float f = Math.min(1f, 1000f / Math.max(w, h));
+            out.add(f < 1f ? Bitmap.createScaledBitmap(bmp, Math.round(w * f), Math.round(h * f), true) : bmp);
+            captureChain(views, i + 1, out, done);
+        }));
+        glView.requestRender();
+    }
+
+    private void buildPdf(List<Bitmap> imgs) {
+        final Mesh m = current;
+        android.content.SharedPreferences sp = getSharedPreferences("relatorio", MODE_PRIVATE);
+        final Report.Data d = new Report.Data();
+        d.title = devActive ? "Relatório de inspeção dimensional" : "Relatório dimensional";
+        d.date = new SimpleDateFormat("dd/MM/yyyy HH:mm", BR).format(new Date());
+        String cli = sp.getString("cliente", ""), pec = sp.getString("peca", ""), res = sp.getString("responsavel", ""), obs = sp.getString("obs", "");
+        if (!cli.isEmpty()) d.info.add(new String[]{"Cliente", cli});
+        if (!pec.isEmpty()) d.info.add(new String[]{"Peça / OS", pec});
+        d.info.add(new String[]{"Arquivo do scan", m.name});
+        if (refMesh != null) d.info.add(new String[]{"Referência CAD", refMesh.name});
+        d.info.add(new String[]{"Dimensões (X · Y · Z)", f2(m.max[0] - m.min[0]) + " · " + f2(m.max[1] - m.min[1]) + " · " + f2(m.max[2] - m.min[2]) + " mm"});
+        d.info.add(new String[]{"Malha", String.format(BR, "%,d vértices", m.vertexCount)
+                + (m.pointCloud ? " (nuvem de pontos)" : String.format(BR, " · %,d triângulos", m.triangleCount))});
+        if (!history.isEmpty()) d.info.add(new String[]{"Alinhamento", "malha alinhada ao sistema de coordenadas de trabalho"});
+        if (!res.isEmpty()) d.info.add(new String[]{"Responsável técnico", res});
+        d.images.addAll(imgs);
+        d.captions.add("Vista de trabalho");
+        d.captions.add("Isométrica");
+        d.captions.add("Frontal");
+        d.captions.add("Superior");
+        if (devActive && scanDev != null) {
+            double tol = TOLS[tolIdx];
+            d.legendTol = tol;
+            Deviation.Stats st = Deviation.stats(scanDev, tol);
+            List<String> c = new ArrayList<>();
+            c.add(String.format(BR, "Tolerância: ± %.2f mm", tol));
+            c.add(String.format(BR, "Dentro da tolerância: %.1f %% · acima: %.1f %% · abaixo: %.1f %%", st.inTol, st.above, st.below));
+            c.add(String.format(BR, "Desvio médio: %+.3f mm · desvio padrão: %.3f mm · RMS: %.3f mm", st.mean, st.std, st.rms));
+            c.add(String.format(BR, "Desvio máximo: %+.3f mm · desvio mínimo: %+.3f mm", st.max, st.min));
+            if (st.unmatched > 0) {
+                c.add(String.format(BR, "Pontos sem correspondência (além de %.2f mm): %.1f %%",
+                        Deviation.cutoff(tol), 100.0 * st.unmatched / Math.max(1, st.matched + st.unmatched)));
+            }
+            if (alignInfo != null) c.add(alignInfo.replace("⚠ ", "Atenção: "));
+            d.sections.put("Comparação com o modelo CAD", c);
+        }
+        if (analysis != null) {
+            MeshAnalysis a = analysis;
+            List<String> c = new ArrayList<>();
+            c.add("Malha fechada (estanque): " + (a.closed ? "sim" : "não"));
+            c.add("Área da superfície: " + f2(a.area) + " mm²");
+            if (a.closed) c.add("Volume: " + f2(a.volume / 1000.0) + " cm³ · massa em " + MAT_NAMES[material] + ": " + f2(a.volume / 1000.0 * MAT_DENS[material]) + " g");
+            c.add(String.format(BR, "Bordas abertas: %,d · contornos (furos): %d · ilhas: %d", a.boundaryEdges, a.holes, a.shells));
+            d.sections.put("Análise da malha", c);
+        }
+        List<String> items = new ArrayList<>();
+        for (int i = 0; i < reportItems.size(); i++) items.add((i + 1) + ". " + reportItems.get(i));
+        d.sections.put("Medições", items);
+        if (!obs.isEmpty()) {
+            List<String> o = new ArrayList<>();
+            o.add(obs);
+            d.sections.put("Observações", o);
+        }
+        final Uri target = pendingPdfUri;
+        final ContentResolver cr = getContentResolver();
+        final String fname = "Relatorio_" + baseName() + ".pdf";
+        worker.execute(() -> {
+            String err = null;
+            File f = null;
+            try {
+                if (target != null) {
+                    try (OutputStream os = cr.openOutputStream(target, "wt")) {
+                        if (os == null) throw new java.io.IOException("Destino inválido");
+                        new Report().write(d, os);
+                    }
+                } else {
+                    f = freshShareFile(fname);
+                    try (OutputStream os = new FileOutputStream(f)) {
+                        new Report().write(d, os);
+                    }
+                }
+            } catch (Exception e) {
+                err = e.getMessage() != null ? e.getMessage() : e.toString();
+            }
+            final File ff = f;
+            final String fe = err;
+            runOnUiThread(() -> {
+                busy = false;
+                progress.setVisibility(View.GONE);
+                if (fe != null) { toast("Erro no relatório: " + fe); return; }
+                if (ff != null) share(ff, "application/pdf", "Enviar relatório");
+                else toast("Relatório salvo");
+            });
+        });
+    }
+
     // ---------------------------------------------------------------- Apresentação
 
     private void setPresenting(boolean on) {
@@ -1302,6 +1814,20 @@ public class MainActivity extends Activity {
         p.addView(row(
                 btn("Salvar STL...", v -> createDoc(".stl", REQ_SAVE_STL)),
                 btn("Salvar PLY...", v -> createDoc(".ply", REQ_SAVE_PLY))));
+        p.addView(label("Relatório técnico em PDF:"));
+        p.addView(row(btn("Gerar e enviar PDF", v -> startReport(null)), btn("Salvar PDF...", v -> {
+            if (current == null) { toast("Abra um arquivo primeiro"); return; }
+            Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("application/pdf");
+            i.putExtra(Intent.EXTRA_TITLE, "Relatorio_" + baseName() + ".pdf");
+            startActivityForResult(i, REQ_SAVE_PDF);
+        })));
+        itemsBtn = btn("Itens: 0 · limpar", v -> {
+            reportItems.clear();
+            refreshItemsBtn();
+        });
+        p.addView(row(btn("Dados do relatório", v -> showReportDialog(null)), itemsBtn));
         return p;
     }
 
@@ -1391,7 +1917,8 @@ public class MainActivity extends Activity {
     }
 
     private boolean hasMeasureResult() {
-        return mPicks.size() >= (diameterMode ? 3 : 2);
+        if (measureMode >= 2) return fitCur != null;
+        return mPicks.size() >= (measureMode == 1 ? 3 : 2);
     }
 
     private Bitmap withFooter(Bitmap src, String line1, String line2) {
@@ -1445,12 +1972,16 @@ public class MainActivity extends Activity {
         float[] yellow = {1f, 0.84f, 0.2f}, magenta = {1f, 0.3f, 0.85f}, cyan = {0.3f, 0.95f, 1f};
         if (tool == TOOL_MEASURE) {
             for (Picker.Hit h : mPicks) add(pts, ptc, h.p, yellow);
-            if (!diameterMode && mPicks.size() >= 2) {
+            if (measureMode == 0 && mPicks.size() >= 2) {
                 add(ln, lnc, mPicks.get(0).p, yellow);
                 add(ln, lnc, mPicks.get(1).p, yellow);
             }
-            if (diameterMode && mPicks.size() >= 3) {
+            if (measureMode == 1 && mPicks.size() >= 3) {
                 circleLines(mPicks.get(0).p, mPicks.get(1).p, mPicks.get(2).p, ln, lnc, cyan, pts, ptc);
+            }
+            if (measureMode >= 2) {
+                fitOverlay(fitPrev, new float[]{1f, 0.6f, 0.2f}, pts, ptc, ln, lnc);
+                fitOverlay(fitCur, new float[]{0.3f, 1f, 0.5f}, pts, ptc, ln, lnc);
             }
         } else if (tool == TOOL_ANALYZE && showBorders && analysis != null && analysis.boundaryLines.length > 0) {
             float[] bl = analysis.boundaryLines;
@@ -1598,6 +2129,10 @@ public class MainActivity extends Activity {
 
     private void toast(String s) {
         Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
+    }
+
+    private static String f3(double v) {
+        return String.format(BR, "%.3f", v);
     }
 
     private static String f2(double v) {

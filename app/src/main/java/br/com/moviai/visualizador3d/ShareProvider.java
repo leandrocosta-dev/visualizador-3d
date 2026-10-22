@@ -50,6 +50,8 @@ public class ShareProvider extends ContentProvider {
         String n = uri.getLastPathSegment();
         if (n == null) return "application/octet-stream";
         if (n.endsWith(".png")) return "image/png";
+        if (n.endsWith(".pdf")) return "application/pdf";
+        if (n.endsWith(".dxf")) return "application/dxf";
         return "application/octet-stream";
     }
 

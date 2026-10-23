@@ -48,3 +48,6 @@ App nativo para visualizar malhas e nuvens de pontos `.stl` e `.ply` no celular.
 | `ModelRenderer.java` | Renderização OpenGL ES 3.0 e câmera orbital |
 | `ModelView.java` | Gestos de toque |
 | `MainActivity.java` | Interface e abertura de arquivos |
+
+## 7.1: AR com sombreamento e cor
+Na realidade aumentada a peça recebe luz fixa no mundo (ambiente, difusa, brilho) e uma barra de cores permite trocar a cor (azul, laranja, verde, vermelho, cinza, branco) ou voltar às cores originais (mapas de desvio e espessura).

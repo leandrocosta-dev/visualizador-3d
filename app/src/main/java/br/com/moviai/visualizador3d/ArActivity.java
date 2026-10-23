@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.opengl.GLES11Ext;
 import android.opengl.GLES30;
 import android.opengl.GLSurfaceView;
@@ -17,6 +18,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -58,6 +60,13 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
 
     private final ConcurrentLinkedQueue<float[]> taps = new ConcurrentLinkedQueue<>();
     private volatile float yaw = 0f;
+    /** Cor da peça: -1 = cores originais da malha (ou mapa de desvio/espessura); senão índice em SWATCHES. */
+    private volatile int colorIndex = 0;
+    private static final String[] SWATCH_NAMES = {"Azul", "Laranja", "Verde", "Vermelho", "Cinza", "Branco"};
+    private static final float[][] SWATCHES = {
+            {0.20f, 0.52f, 0.95f}, {1.00f, 0.50f, 0.10f}, {0.20f, 0.78f, 0.35f},
+            {0.90f, 0.20f, 0.18f}, {0.45f, 0.48f, 0.53f}, {0.95f, 0.95f, 0.95f}};
+    private static final int[] SWATCH_RGB = {0xFF3385F2, 0xFFFF801A, 0xFF33C759, 0xFFE63330, 0xFF737A87, 0xFFF2F2F2};
     private volatile boolean displayChanged = true;
     private int viewW = 1, viewH = 1;
 
@@ -65,7 +74,7 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
     private int camTex;
     private int bgProg, meshProg;
     private int bgPos, bgUv, bgTex;
-    private int mPos, mNrm, mCol, mMvp, mMv;
+    private int mPos, mNrm, mCol, mMvp, mMv, mL, mUp, mTint, mUseTint;
     private final int[] vbo = new int[4];
     private FloatBuffer quadNdc, quadUv;
     private Anchor anchor;
@@ -103,6 +112,55 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
         status.setText("Iniciando a câmera...");
         root.addView(status, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP));
+
+        colorIndex = mesh.colors != null ? -1 : 0;
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER);
+        row.setPadding(dp(10), dp(6), dp(10), dp(6));
+        GradientDrawable pill = new GradientDrawable();
+        pill.setColor(0x99000000);
+        pill.setCornerRadius(dp(24));
+        row.setBackground(pill);
+        final View[] dots = new View[SWATCHES.length + 1];
+        Runnable refresh = () -> {
+            for (int i = 0; i < dots.length; i++) {
+                if (dots[i] == null) continue;
+                int idx = i - 1;
+                GradientDrawable g = new GradientDrawable();
+                g.setShape(idx < 0 ? GradientDrawable.RECTANGLE : GradientDrawable.OVAL);
+                if (idx < 0) g.setCornerRadius(dp(14));
+                g.setColor(idx < 0 ? 0xFF455A64 : SWATCH_RGB[idx]);
+                g.setStroke(dp(colorIndex == idx ? 3 : 1), colorIndex == idx ? 0xFFFFFFFF : 0x66FFFFFF);
+                dots[i].setBackground(g);
+            }
+        };
+        if (mesh.colors != null) {
+            TextView orig = new TextView(this);
+            orig.setText("Original");
+            orig.setTextColor(Color.WHITE);
+            orig.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            orig.setGravity(Gravity.CENTER);
+            orig.setPadding(dp(10), 0, dp(10), 0);
+            orig.setOnClickListener(v -> { colorIndex = -1; refresh.run(); });
+            dots[0] = orig;
+            row.addView(orig, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(30)));
+        }
+        for (int i = 0; i < SWATCHES.length; i++) {
+            final int k = i;
+            View d = new View(this);
+            d.setContentDescription(SWATCH_NAMES[i]);
+            d.setOnClickListener(v -> { colorIndex = k; refresh.run(); });
+            dots[i + 1] = d;
+            LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(dp(30), dp(30));
+            dl.setMargins(dp(5), 0, dp(5), 0);
+            row.addView(d, dl);
+        }
+        refresh.run();
+        FrameLayout.LayoutParams rl = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        rl.setMargins(0, 0, 0, dp(96));
+        root.addView(row, rl);
 
         Button close = new Button(this);
         close.setText("Fechar");
@@ -269,16 +327,38 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
 
         meshProg = program(
                 "uniform mat4 uMvp;\nuniform mat4 uMv;\nattribute vec3 aPos;\nattribute vec3 aNrm;\nattribute vec3 aCol;\n" +
-                "varying vec3 vN;\nvarying vec3 vC;\n" +
-                "void main(){ gl_Position = uMvp * vec4(aPos, 1.0); vN = mat3(uMv) * aNrm; vC = aCol; }\n",
-                "precision mediump float;\nvarying vec3 vN;\nvarying vec3 vC;\n" +
-                "void main(){ float l = length(vN); float d = l > 1e-6 ? abs(vN.z / l) : 1.0;\n" +
-                "  gl_FragColor = vec4(vC * (0.35 + 0.65 * d) + vec3(0.12) * pow(d, 24.0), 1.0); }\n");
+                "varying vec3 vN;\nvarying vec3 vV;\nvarying vec3 vC;\n" +
+                "void main(){\n" +
+                "  gl_Position = uMvp * vec4(aPos, 1.0);\n" +
+                "  vec3 vp = (uMv * vec4(aPos, 1.0)).xyz;\n" +
+                "  vec3 v = normalize(-vp);\n" +
+                "  vec3 n = mat3(uMv) * aNrm;\n" +
+                "  float ln = length(n);\n" +
+                "  n = ln > 1e-9 ? n / ln : v;\n" +
+                "  if (dot(n, v) < 0.0) n = -n;\n" +
+                "  vN = n; vV = v; vC = aCol;\n" +
+                "}\n",
+                "precision mediump float;\nvarying vec3 vN;\nvarying vec3 vV;\nvarying vec3 vC;\n" +
+                "uniform vec3 uL;\nuniform vec3 uUp;\nuniform vec3 uTint;\nuniform float uUseTint;\n" +
+                "void main(){\n" +
+                "  vec3 n = normalize(vN); vec3 v = normalize(vV);\n" +
+                "  vec3 base = mix(vC, uTint, uUseTint);\n" +
+                "  float diff = max(dot(n, uL), 0.0);\n" +
+                "  float head = max(dot(n, v), 0.0);\n" +
+                "  float hemi = 0.5 + 0.5 * dot(n, uUp);\n" +
+                "  float spec = pow(max(dot(n, normalize(uL + v)), 0.0), 48.0);\n" +
+                "  vec3 c = base * (0.18 + 0.22 * hemi + 0.50 * diff + 0.18 * head) + vec3(0.22) * spec;\n" +
+                "  gl_FragColor = vec4(c, 1.0);\n" +
+                "}\n");
         mPos = GLES30.glGetAttribLocation(meshProg, "aPos");
         mNrm = GLES30.glGetAttribLocation(meshProg, "aNrm");
         mCol = GLES30.glGetAttribLocation(meshProg, "aCol");
         mMvp = GLES30.glGetUniformLocation(meshProg, "uMvp");
         mMv = GLES30.glGetUniformLocation(meshProg, "uMv");
+        mL = GLES30.glGetUniformLocation(meshProg, "uL");
+        mUp = GLES30.glGetUniformLocation(meshProg, "uUp");
+        mTint = GLES30.glGetUniformLocation(meshProg, "uTint");
+        mUseTint = GLES30.glGetUniformLocation(meshProg, "uUseTint");
 
         quadNdc = fb(new float[]{-1, -1, 1, -1, -1, 1, 1, 1});
         quadUv = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
@@ -427,6 +507,24 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
         GLES30.glUseProgram(meshProg);
         GLES30.glUniformMatrix4fv(mMvp, 1, false, mvp, 0);
         GLES30.glUniformMatrix4fv(mMv, 1, false, mv, 0);
+        // luz fixa no mundo (de cima, levemente de lado), convertida para o espaço da câmera
+        float lx = 0.35f, ly = 0.85f, lz = 0.40f;
+        float ll = (float) Math.sqrt(lx * lx + ly * ly + lz * lz);
+        lx /= ll; ly /= ll; lz /= ll;
+        GLES30.glUniform3f(mL,
+                view[0] * lx + view[4] * ly + view[8] * lz,
+                view[1] * lx + view[5] * ly + view[9] * lz,
+                view[2] * lx + view[6] * ly + view[10] * lz);
+        GLES30.glUniform3f(mUp, view[4], view[5], view[6]);
+        int ci = colorIndex;
+        float[] tc = ci >= 0 && ci < SWATCHES.length ? SWATCHES[ci] : null;
+        if (tc != null) {
+            GLES30.glUniform3f(mTint, tc[0], tc[1], tc[2]);
+            GLES30.glUniform1f(mUseTint, 1f);
+        } else {
+            GLES30.glUniform3f(mTint, 0.7f, 0.7f, 0.7f);
+            GLES30.glUniform1f(mUseTint, 0f);
+        }
 
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vbo[0]);
         GLES30.glEnableVertexAttribArray(mPos);
@@ -445,7 +543,7 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
             GLES30.glVertexAttribPointer(mCol, 3, GLES30.GL_UNSIGNED_BYTE, true, 0, 0);
         } else {
             GLES30.glDisableVertexAttribArray(mCol);
-            GLES30.glVertexAttrib3f(mCol, 0.78f, 0.80f, 0.84f);
+            GLES30.glVertexAttrib3f(mCol, 0.55f, 0.58f, 0.64f);
         }
         if (m.pointCloud) {
             GLES30.glDrawArrays(GLES30.GL_POINTS, 0, m.vertexCount);

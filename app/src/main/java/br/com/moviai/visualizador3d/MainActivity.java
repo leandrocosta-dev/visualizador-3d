@@ -2430,8 +2430,10 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {
         }
         // malhas grandes usam a versão leve para manter a fluidez da câmera
+        // a versão completa vai até 4 milhões de triângulos; acima disso usa a leve
         Mesh l = currentLite;
-        ArActivity.pending = l != null ? l : m;
+        boolean heavy = m.pointCloud ? m.vertexCount > 6_000_000 : MeshAnalysis.triCount(m) > 4_000_000;
+        ArActivity.pending = (heavy && l != null) ? l : m;
         startActivity(new Intent(this, ArActivity.class));
     }
 

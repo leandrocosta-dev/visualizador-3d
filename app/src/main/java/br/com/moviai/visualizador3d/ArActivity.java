@@ -40,7 +40,9 @@ import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
+import javax.microedition.khronos.egl.EGL10;
 import javax.microedition.khronos.egl.EGLConfig;
+import javax.microedition.khronos.egl.EGLDisplay;
 import javax.microedition.khronos.opengles.GL10;
 
 /** Peça em escala real (arquivo em mm) sobre uma superfície detectada pela câmera (ARCore). */
@@ -60,6 +62,9 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
 
     private final ConcurrentLinkedQueue<float[]> taps = new ConcurrentLinkedQueue<>();
     private volatile float yaw = 0f;
+    /** Escala do usuário: 1 = tamanho real; menor reduz, maior amplia. */
+    private volatile float userScale = 1f;
+    private float lastDist = Float.NaN;
     /** Cor da peça: -1 = cores originais da malha (ou mapa de desvio/espessura); senão índice em SWATCHES. */
     private volatile int colorIndex = 0;
     private static final String[] SWATCH_NAMES = {"Azul", "Laranja", "Verde", "Vermelho", "Cinza", "Branco"};
@@ -98,7 +103,7 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
         surface = new GLSurfaceView(this);
         surface.setPreserveEGLContextOnPause(true);
         surface.setEGLContextClientVersion(3);
-        surface.setEGLConfigChooser(8, 8, 8, 8, 16, 0);
+        surface.setEGLConfigChooser(new AaChooser());
         surface.setRenderer(this);
         surface.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
         surface.setOnTouchListener((v, e) -> onTouch(e));
@@ -162,6 +167,38 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
         rl.setMargins(0, 0, 0, dp(96));
         root.addView(row, rl);
 
+        LinearLayout sRow = new LinearLayout(this);
+        sRow.setOrientation(LinearLayout.HORIZONTAL);
+        sRow.setGravity(Gravity.CENTER);
+        sRow.setPadding(dp(8), dp(4), dp(8), dp(4));
+        GradientDrawable sPill = new GradientDrawable();
+        sPill.setColor(0x99000000);
+        sPill.setCornerRadius(dp(24));
+        sRow.setBackground(sPill);
+        String[] sl = {"−", "1:1 real", "+"};
+        for (int i = 0; i < 3; i++) {
+            final int k = i;
+            Button b = new Button(this);
+            b.setText(sl[i]);
+            b.setAllCaps(false);
+            b.setTextColor(Color.WHITE);
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, i == 1 ? 14 : 20);
+            b.setBackground(null);
+            b.setMinWidth(0);
+            b.setMinimumWidth(0);
+            b.setPadding(dp(14), 0, dp(14), 0);
+            b.setOnClickListener(v -> {
+                if (k == 0) setScale(userScale / 1.5f);
+                else if (k == 1) setScale(1f);
+                else setScale(userScale * 1.5f);
+            });
+            sRow.addView(b, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
+        }
+        FrameLayout.LayoutParams sl2 = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        sl2.setMargins(0, 0, 0, dp(150));
+        root.addView(sRow, sl2);
+
         Button close = new Button(this);
         close.setText("Fechar");
         close.setAllCaps(false);
@@ -176,6 +213,27 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
             return insets;
         });
         setContentView(root);
+    }
+
+    /** Prefere 24 bits de profundidade e antisserrilhado 4x; cai para configurações mais simples se faltar. */
+    private static final class AaChooser implements GLSurfaceView.EGLConfigChooser {
+        @Override
+        public EGLConfig chooseConfig(EGL10 egl, EGLDisplay display) {
+            int[][] tries = {{24, 4}, {16, 4}, {24, 0}, {16, 0}};
+            for (int[] t : tries) {
+                int[] attr = {
+                        EGL10.EGL_RED_SIZE, 8, EGL10.EGL_GREEN_SIZE, 8, EGL10.EGL_BLUE_SIZE, 8, EGL10.EGL_ALPHA_SIZE, 8,
+                        EGL10.EGL_DEPTH_SIZE, t[0],
+                        EGL10.EGL_RENDERABLE_TYPE, 0x0040, // EGL_OPENGL_ES3_BIT
+                        EGL10.EGL_SAMPLE_BUFFERS, t[1] > 0 ? 1 : 0,
+                        EGL10.EGL_SAMPLES, t[1],
+                        EGL10.EGL_NONE};
+                EGLConfig[] cfg = new EGLConfig[1];
+                int[] n = new int[1];
+                if (egl.eglChooseConfig(display, attr, cfg, 1, n) && n[0] > 0) return cfg[0];
+            }
+            throw new IllegalStateException("Nenhuma configuração EGL");
+        }
     }
 
     private int dp(int v) {
@@ -265,6 +323,10 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
 
     // ================================================================ toque
 
+    private void setScale(float v) {
+        userScale = Math.max(0.02f, Math.min(50f, v));
+    }
+
     private boolean onTouch(MotionEvent e) {
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
@@ -272,9 +334,11 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
                 downY = e.getY();
                 downTime = e.getEventTime();
                 lastAngle = Float.NaN;
+                lastDist = Float.NaN;
                 break;
             case MotionEvent.ACTION_POINTER_DOWN:
                 lastAngle = Float.NaN;
+                lastDist = Float.NaN;
                 downTime = 0; // não é toque simples
                 break;
             case MotionEvent.ACTION_MOVE:
@@ -287,6 +351,12 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
                         yaw -= d;
                     }
                     lastAngle = a;
+                    float dx = e.getX(1) - e.getX(0), dy = e.getY(1) - e.getY(0);
+                    float dist = (float) Math.sqrt(dx * dx + dy * dy);
+                    if (!Float.isNaN(lastDist) && lastDist > 1f) {
+                        setScale(userScale * dist / lastDist);
+                    }
+                    lastDist = dist;
                 }
                 break;
             case MotionEvent.ACTION_UP:
@@ -443,12 +513,18 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
                 return;
             }
             if (anchor.getTrackingState() != TrackingState.TRACKING) return;
-            setStatus(String.format(new java.util.Locale("pt", "BR"),
-                    "Escala real (%.0f × %.0f × %.0f mm). Dois dedos giram; toque em outro ponto para mover.",
-                    mesh.max[0] - mesh.min[0], mesh.max[1] - mesh.min[1], mesh.max[2] - mesh.min[2]));
+            float us = userScale;
+            if (Math.abs(us - 1f) < 0.005f) {
+                setStatus(String.format(new java.util.Locale("pt", "BR"),
+                        "Escala real 1:1 (%.0f × %.0f × %.0f mm). Dois dedos giram e ampliam; toque em outro ponto para mover.",
+                        mesh.max[0] - mesh.min[0], mesh.max[1] - mesh.min[1], mesh.max[2] - mesh.min[2]));
+            } else {
+                setStatus(String.format(new java.util.Locale("pt", "BR"),
+                        "Escala %.0f%% (NÃO é o tamanho real). Toque em \"1:1 real\" para voltar.", us * 100));
+            }
 
             float[] proj = new float[16], view = new float[16];
-            cam.getProjectionMatrix(proj, 0, 0.01f, 50f);
+            cam.getProjectionMatrix(proj, 0, 0.03f, 8f);
             cam.getViewMatrix(view, 0);
             drawMesh(proj, view);
         } catch (Exception e) {
@@ -496,7 +572,8 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
         Matrix.setIdentityM(model, 0);
         Matrix.rotateM(model, 0, yaw, 0, 1, 0);
         Matrix.rotateM(model, 0, -90, 1, 0, 0);
-        Matrix.scaleM(model, 0, 0.001f, 0.001f, 0.001f);
+        float sc = 0.001f * userScale;
+        Matrix.scaleM(model, 0, sc, sc, sc);
         Matrix.translateM(model, 0, -m.center[0], -m.center[1], -m.min[2]);
         float[] world = new float[16], mv = new float[16], mvp = new float[16];
         Matrix.multiplyMM(world, 0, anchorM, 0, model, 0);

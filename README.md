@@ -51,3 +51,6 @@ App nativo para visualizar malhas e nuvens de pontos `.stl` e `.ply` no celular.
 
 ## 7.1: AR com sombreamento e cor
 Na realidade aumentada a peça recebe luz fixa no mundo (ambiente, difusa, brilho) e uma barra de cores permite trocar a cor (azul, laranja, verde, vermelho, cinza, branco) ou voltar às cores originais (mapas de desvio e espessura).
+
+## 7.2: AR com qualidade e escala
+Antisserrilhado 4x, profundidade de 24 bits e planos de corte mais justos (fim do serrilhado e da cintilação), malha completa até 4 milhões de triângulos, pinça para ampliar/reduzir e botões -, 1:1 real e +.

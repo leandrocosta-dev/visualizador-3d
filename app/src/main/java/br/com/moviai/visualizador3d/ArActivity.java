@@ -574,7 +574,8 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
         final Mesh m = mesh;
         new Thread(() -> {
             try {
-                android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(px, w, h, android.graphics.Bitmap.Config.ARGB_8888);
+                android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+                bmp.setPixels(px, 0, w, 0, 0, w, h);
                 android.graphics.Canvas c = new android.graphics.Canvas(bmp);
                 float d = getResources().getDisplayMetrics().density;
                 android.graphics.Paint bg = new android.graphics.Paint();

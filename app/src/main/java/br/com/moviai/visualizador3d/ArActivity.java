@@ -178,21 +178,21 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
         String[] sl = {"−", "1:1 real", "+"};
         for (int i = 0; i < 3; i++) {
             final int k = i;
-            Button b = new Button(this);
-            b.setText(sl[i]);
-            b.setAllCaps(false);
-            b.setTextColor(Color.WHITE);
-            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, i == 1 ? 14 : 20);
-            b.setBackground(null);
-            b.setMinWidth(0);
-            b.setMinimumWidth(0);
-            b.setPadding(dp(14), 0, dp(14), 0);
-            b.setOnClickListener(v -> {
+            Button sb = new Button(this);
+            sb.setText(sl[i]);
+            sb.setAllCaps(false);
+            sb.setTextColor(Color.WHITE);
+            sb.setTextSize(TypedValue.COMPLEX_UNIT_SP, i == 1 ? 14 : 20);
+            sb.setBackground(null);
+            sb.setMinWidth(0);
+            sb.setMinimumWidth(0);
+            sb.setPadding(dp(14), 0, dp(14), 0);
+            sb.setOnClickListener(v -> {
                 if (k == 0) setScale(userScale / 1.5f);
                 else if (k == 1) setScale(1f);
                 else setScale(userScale * 1.5f);
             });
-            sRow.addView(b, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
+            sRow.addView(sb, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
         }
         FrameLayout.LayoutParams sl2 = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);

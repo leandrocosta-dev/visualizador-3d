@@ -203,10 +203,21 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
         close.setText("Fechar");
         close.setAllCaps(false);
         close.setOnClickListener(v -> finish());
+        Button shot = new Button(this);
+        shot.setText("Foto");
+        shot.setAllCaps(false);
+        shot.setOnClickListener(v -> photoRequested = true);
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        bp.setMargins(dp(6), 0, dp(6), 0);
+        bar.addView(shot, bp);
+        bar.addView(close, bp);
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         lp.setMargins(0, 0, 0, dp(36));
-        root.addView(close, lp);
+        root.addView(bar, lp);
 
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             status.setPadding(dp(16), dp(16) + insets.getSystemWindowInsetTop(), dp(16), dp(16));
@@ -474,6 +485,7 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT | GLES30.GL_DEPTH_BUFFER_BIT);
         Session s = session;
         if (s == null) return;
+        boolean drew = false;
         try {
             if (displayChanged) {
                 int rot = getWindowManager().getDefaultDisplay().getRotation();
@@ -492,6 +504,7 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
             }
             if (frame.getTimestamp() == 0) return;
             drawBackground();
+            drew = true;
 
             if (cam.getTrackingState() != TrackingState.TRACKING) {
                 setStatus(everTracked ? "Rastreamento perdido. Aponte para a mesa e mova devagar."
@@ -529,7 +542,80 @@ public class ArActivity extends Activity implements GLSurfaceView.Renderer {
             drawMesh(proj, view);
         } catch (Exception e) {
             Log.e(TAG, "Erro no quadro AR", e);
+        } finally {
+            if (drew && photoRequested) {
+                photoRequested = false;
+                takePhoto();
+            }
         }
+    }
+
+    // ================================================================ foto
+
+    private volatile boolean photoRequested = false;
+
+    /** Lê os pixels do quadro atual (câmera + peça), grava um PNG com legenda e abre o compartilhamento. */
+    private void takePhoto() {
+        final int w = viewW, h = viewH;
+        ByteBuffer buf = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder());
+        GLES30.glReadPixels(0, 0, w, h, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf);
+        final int[] px = new int[w * h];
+        buf.rewind();
+        int[] row = new int[w];
+        for (int y = 0; y < h; y++) {
+            int dst = (h - 1 - y) * w;
+            for (int x = 0; x < w; x++) {
+                int r = buf.get() & 0xFF, g = buf.get() & 0xFF, b = buf.get() & 0xFF, a = buf.get() & 0xFF;
+                row[x] = 0xFF000000 | (r << 16) | (g << 8) | b;
+            }
+            System.arraycopy(row, 0, px, dst, w);
+        }
+        final float us = userScale;
+        final Mesh m = mesh;
+        new Thread(() -> {
+            try {
+                android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(px, w, h, android.graphics.Bitmap.Config.ARGB_8888);
+                android.graphics.Canvas c = new android.graphics.Canvas(bmp);
+                float d = getResources().getDisplayMetrics().density;
+                android.graphics.Paint bg = new android.graphics.Paint();
+                bg.setColor(0xB3000000);
+                float bh = 58 * d;
+                c.drawRect(0, h - bh, w, h, bg);
+                android.graphics.Paint t = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+                t.setColor(Color.WHITE);
+                t.setTextSize(14 * d);
+                String scale = Math.abs(us - 1f) < 0.005f ? "escala real 1:1"
+                        : String.format(new java.util.Locale("pt", "BR"), "escala %.0f%% (não é o tamanho real)", us * 100);
+                String nm = m.name == null || m.name.isEmpty() ? "Peça" : m.name;
+                c.drawText(nm + "   " + String.format(new java.util.Locale("pt", "BR"), "%.0f × %.0f × %.0f mm",
+                        m.max[0] - m.min[0], m.max[1] - m.min[1], m.max[2] - m.min[2]), 12 * d, h - bh + 22 * d, t);
+                t.setColor(0xFFFFD54F);
+                c.drawText("Realidade aumentada · " + scale, 12 * d, h - bh + 41 * d, t);
+                t.setColor(0xFF90A4AE);
+                t.setTextSize(11 * d);
+                t.setTextAlign(android.graphics.Paint.Align.RIGHT);
+                c.drawText("MoviAI Engenharia Digital", w - 12 * d, h - 10 * d, t);
+                java.io.File dir = ShareProvider.dir(this);
+                java.io.File[] old = dir.listFiles();
+                if (old != null) for (java.io.File o : old) o.delete();
+                String ts = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(new java.util.Date());
+                java.io.File f = new java.io.File(dir, "ar_" + ts + ".png");
+                try (java.io.FileOutputStream os = new java.io.FileOutputStream(f)) {
+                    bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, os);
+                }
+                runOnUiThread(() -> {
+                    android.net.Uri uri = ShareProvider.uriFor(f);
+                    android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_SEND);
+                    i.setType("image/png");
+                    i.putExtra(android.content.Intent.EXTRA_STREAM, uri);
+                    i.setClipData(android.content.ClipData.newRawUri(f.getName(), uri));
+                    i.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    startActivity(android.content.Intent.createChooser(i, "Compartilhar foto em RA"));
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> Toast.makeText(this, "Erro na foto: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        }).start();
     }
 
     private void place(Frame frame, float x, float y) {

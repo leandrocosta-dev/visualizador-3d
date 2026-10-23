@@ -28,6 +28,9 @@ final class Report {
         final List<String> captions = new ArrayList<>();
         /** Tolerância da legenda de desvios, ou null se não houver mapa. */
         Double legendTol = null;
+        String companyLine = "";
+        String signName = "";
+        String signArt = "";
         final Map<String, List<String>> sections = new LinkedHashMap<>();
     }
 
@@ -69,6 +72,7 @@ final class Report {
                 for (String line : e.getValue()) paragraph(line);
                 y += 6;
             }
+            drawSignature();
             finishPage();
             doc.writeTo(os);
         } finally {
@@ -104,7 +108,9 @@ final class Report {
         if (page == null) return;
         Paint f = new Paint(muted);
         c.drawLine(M, H - 34, W - M, H - 34, f);
-        c.drawText("Gerado pelo Visualizador 3D · MoviAI Engenharia Digital", M, H - 20, f);
+        String foot = "Gerado pelo Visualizador 3D · MoviAI Engenharia Digital";
+        if (data.companyLine != null && !data.companyLine.isEmpty()) foot += " · " + data.companyLine;
+        c.drawText(foot, M, H - 20, f);
         f.setTextAlign(Paint.Align.RIGHT);
         c.drawText("Página " + pageNo, W - M, H - 20, f);
         doc.finishPage(page);
@@ -195,6 +201,28 @@ final class Report {
         t.setTextAlign(Paint.Align.RIGHT);
         c.drawText("sobra de material   ·   cinza: sem correspondência", W - M, y + bh + 24, t);
         y += bh + 40;
+    }
+
+    /** Linha de assinatura com nome, ART e data. */
+    private void drawSignature() {
+        ensure(100);
+        y += 36;
+        Paint line = new Paint();
+        line.setColor(C_TEXT);
+        line.setStrokeWidth(0.8f);
+        float x1 = M + 240;
+        c.drawLine(M, y, x1, y, line);
+        String name = data.signName == null || data.signName.isEmpty() ? "Responsável técnico" : data.signName;
+        c.drawText(name, M, y + 13, bold);
+        float yy = y + 26;
+        if (data.signArt != null && !data.signArt.isEmpty()) {
+            c.drawText("ART nº " + data.signArt, M, yy, text);
+            yy += 13;
+        }
+        c.drawText("MoviAI Engenharia Digital", M, yy, muted);
+        String day = data.date == null ? "" : data.date.length() >= 10 ? data.date.substring(0, 10) : data.date;
+        c.drawText("Data: " + day, x1 + 40, y + 13, text);
+        y = yy + 14;
     }
 
     private void heading(String s) {

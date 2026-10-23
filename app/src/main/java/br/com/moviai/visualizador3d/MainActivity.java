@@ -147,6 +147,11 @@ public class MainActivity extends Activity {
     private static final String[] MAT_NAMES = {"PLA", "PETG", "ABS", "Resina", "Alumínio", "Aço"};
     private static final double[] MAT_DENS = {1.24, 1.27, 1.04, 1.15, 2.70, 7.85};
     private Button materialBtn, bordersBtn;
+    private AutoDims.Result dimsRes;
+    private TextView dimsText;
+    private org.json.JSONObject pendingProject;
+    private File pendingProjectDir;
+    private LinearLayout projectList;
 
     // Comparar
     private static final double[] TOLS = {0.02, 0.05, 0.1, 0.2, 0.5, 1.0};
@@ -433,7 +438,8 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     if (id != loadId) return;
                     showMesh(m, ms);
-                    addRecent(uri, fname);
+                    if (pendingProject != null) applyProject(m);
+                    else addRecent(uri, fname);
                 });
                 if (Decimator.worthIt(m)) {
                     try {
@@ -489,6 +495,8 @@ public class MainActivity extends Activity {
         selfIndex = null;
         selfIndexMesh = null;
         qres = null;
+        dimsRes = null;
+        refreshDims();
         notes.clear();
         notesView.setNotes(notes);
         refreshNotes();
@@ -505,6 +513,7 @@ public class MainActivity extends Activity {
     }
 
     private void showError(String name, String msg) {
+        pendingProject = null;
         progress.setVisibility(View.GONE);
         center.setVisibility(View.VISIBLE);
         center.setText("Não foi possível abrir " + name + "\n\n" + msg);
@@ -536,7 +545,7 @@ public class MainActivity extends Activity {
         tool = (tool == t) ? TOOL_NONE : t;
         for (int i = 0; i < toolButtons.length; i++) setSel(toolButtons[i], i == tool);
         panelScroll.removeAllViews();
-        if (tool == TOOL_OPEN) refreshRecent();
+        if (tool == TOOL_OPEN) { refreshRecent(); refreshProjects(); }
         if (tool == TOOL_NONE) {
             panelScroll.setVisibility(View.GONE);
         } else {
@@ -1239,6 +1248,8 @@ public class MainActivity extends Activity {
         if (m != current) return;
         clearDeviation();
         clearThickness();
+        dimsRes = null;
+        refreshDims();
         qres = null;
         refreshQuote();
         pointInfo = null;
@@ -1272,6 +1283,10 @@ public class MainActivity extends Activity {
             getSharedPreferences("recentes", MODE_PRIVATE).edit().clear().apply();
             refreshRecent();
         })));
+        p.addView(label("Projetos salvos (malha alinhada, notas, medições e dados do relatório):"));
+        projectList = new LinearLayout(this);
+        projectList.setOrientation(LinearLayout.VERTICAL);
+        p.addView(projectList);
         return p;
     }
 
@@ -1351,6 +1366,14 @@ public class MainActivity extends Activity {
             refreshAnalysis();
             updateOverlay();
         })));
+        p.addView(label("Cotas automáticas (furos, pinos e raios):"));
+        dimsText = text();
+        p.addView(dimsText);
+        p.addView(row(btn("Detectar cotas", v -> runAutoDims()), btn("Marcar na peça", v -> markDims()), btn("Limpar", v -> {
+            dimsRes = null;
+            refreshDims();
+        })));
+        refreshDims();
         p.addView(row(btn("+ Relatório", v -> {
             if (thickActive) addReportItem(thicknessSummary());
             else if (analysis != null) addReportItem(analyzeText.getText().toString());
@@ -1608,6 +1631,10 @@ public class MainActivity extends Activity {
     }
 
     private void loadReference(Uri uri) {
+        loadReference(uri, null);
+    }
+
+    private void loadReference(Uri uri, String nameOverride) {
         final ContentResolver cr = getContentResolver();
         if (busy) return;
         busy = true;
@@ -1622,6 +1649,7 @@ public class MainActivity extends Activity {
                 }
             } catch (Exception ignored) {
             }
+            if (nameOverride != null) name = nameOverride;
             Mesh r = null;
             Deviation.RefIndex idx = null;
             String err = null;
@@ -1978,24 +2006,31 @@ public class MainActivity extends Activity {
         if (itemsBtn != null) itemsBtn.setText("Itens: " + reportItems.size() + " · limpar");
     }
 
+    private static final String[][] REPORT_FIELDS = {
+            {"cliente", "Cliente"},
+            {"contato", "Contato do cliente (e-mail ou telefone)"},
+            {"projeto", "Nº do projeto ou da proposta"},
+            {"peca", "Peça / ordem de serviço"},
+            {"responsavel", "Responsável técnico (nome e CREA)"},
+            {"art", "ART nº"},
+            {"empresa", "Contato da MoviAI no rodapé (e-mail, telefone, site)"},
+            {"parecer", "Parecer técnico / conclusão"},
+            {"obs", "Observações"}};
+
     private void showReportDialog(Runnable after) {
         final android.content.SharedPreferences sp = getSharedPreferences("relatorio", MODE_PRIVATE);
         LinearLayout l = new LinearLayout(this);
         l.setOrientation(LinearLayout.VERTICAL);
         l.setPadding(dp(20), dp(8), dp(20), 0);
-        final android.widget.EditText cli = field(l, "Cliente", sp.getString("cliente", ""));
-        final android.widget.EditText pec = field(l, "Peça / ordem de serviço", sp.getString("peca", ""));
-        final android.widget.EditText res = field(l, "Responsável técnico (nome e CREA)", sp.getString("responsavel", ""));
-        final android.widget.EditText obs = field(l, "Observações", sp.getString("obs", ""));
+        final android.widget.EditText[] fs = new android.widget.EditText[REPORT_FIELDS.length];
+        for (int i = 0; i < fs.length; i++) fs[i] = field(l, REPORT_FIELDS[i][1], sp.getString(REPORT_FIELDS[i][0], ""));
         new android.app.AlertDialog.Builder(this)
                 .setTitle("Dados do relatório")
-                .setView(l)
+                .setView(wrapScroll(l))
                 .setPositiveButton(after == null ? "Salvar" : "Gerar PDF", (d, w) -> {
-                    sp.edit().putString("cliente", cli.getText().toString().trim())
-                            .putString("peca", pec.getText().toString().trim())
-                            .putString("responsavel", res.getText().toString().trim())
-                            .putString("obs", obs.getText().toString().trim())
-                            .putBoolean("definido", true).apply();
+                    android.content.SharedPreferences.Editor ed = sp.edit();
+                    for (int i = 0; i < fs.length; i++) ed.putString(REPORT_FIELDS[i][0], fs[i].getText().toString().trim());
+                    ed.putBoolean("definido", true).apply();
                     if (after != null) after.run();
                 })
                 .setNegativeButton("Cancelar", null)
@@ -2007,7 +2042,7 @@ public class MainActivity extends Activity {
         l.addView(lab);
         android.widget.EditText e = new android.widget.EditText(this);
         e.setText(value);
-        e.setSingleLine(!hint.startsWith("Observ"));
+        e.setSingleLine(!(hint.startsWith("Observ") || hint.startsWith("Parecer")));
         l.addView(e);
         return e;
     }
@@ -2067,7 +2102,14 @@ public class MainActivity extends Activity {
         d.title = devActive ? "Relatório de inspeção dimensional" : "Relatório dimensional";
         d.date = new SimpleDateFormat("dd/MM/yyyy HH:mm", BR).format(new Date());
         String cli = sp.getString("cliente", ""), pec = sp.getString("peca", ""), res = sp.getString("responsavel", ""), obs = sp.getString("obs", "");
+        String contato = sp.getString("contato", ""), proj = sp.getString("projeto", ""), art = sp.getString("art", "");
+        String parecer = sp.getString("parecer", ""), empresa = sp.getString("empresa", "");
+        d.companyLine = empresa;
+        d.signName = res;
+        d.signArt = art;
+        if (!proj.isEmpty()) d.info.add(new String[]{"Projeto / proposta nº", proj});
         if (!cli.isEmpty()) d.info.add(new String[]{"Cliente", cli});
+        if (!contato.isEmpty()) d.info.add(new String[]{"Contato do cliente", contato});
         if (!pec.isEmpty()) d.info.add(new String[]{"Peça / OS", pec});
         d.info.add(new String[]{"Arquivo do scan", m.name});
         if (refMesh != null) d.info.add(new String[]{"Referência CAD", refMesh.name});
@@ -2076,6 +2118,7 @@ public class MainActivity extends Activity {
                 + (m.pointCloud ? " (nuvem de pontos)" : String.format(BR, " · %,d triângulos", m.triangleCount))});
         if (!history.isEmpty()) d.info.add(new String[]{"Alinhamento", "malha alinhada ao sistema de coordenadas de trabalho"});
         if (!res.isEmpty()) d.info.add(new String[]{"Responsável técnico", res});
+        if (!art.isEmpty()) d.info.add(new String[]{"ART nº", art});
         d.images.addAll(imgs);
         d.captions.add("Vista de trabalho");
         d.captions.add("Isométrica");
@@ -2113,11 +2156,21 @@ public class MainActivity extends Activity {
             for (String line : thicknessSummary().split("\n")) c.add(line);
             d.sections.put("Espessura de parede", c);
         }
+        if (dimsRes != null) {
+            List<String> c = new ArrayList<>();
+            for (String line : AutoDims.describe(dimsRes).split("\n")) c.add(line);
+            d.sections.put("Cotas automáticas", c);
+        }
         d.sections.put("Medições", items);
         if (!notes.isEmpty()) {
             List<String> c = new ArrayList<>();
             for (int i = 0; i < notes.size(); i++) c.add((i + 1) + ". " + notes.get(i).text);
             d.sections.put("Anotações", c);
+        }
+        if (!parecer.isEmpty()) {
+            List<String> o = new ArrayList<>();
+            o.add(parecer);
+            d.sections.put("Parecer técnico", o);
         }
         if (!obs.isEmpty()) {
             List<String> o = new ArrayList<>();
@@ -2416,6 +2469,269 @@ public class MainActivity extends Activity {
         startActivity(Intent.createChooser(i, "Enviar orçamento"));
     }
 
+    // ---------------------------------------------------------------- Cotas automáticas
+
+    private void runAutoDims() {
+        final Mesh m = current;
+        if (m == null) { toast("Abra um arquivo primeiro"); return; }
+        if (m.pointCloud) { toast("As cotas automáticas precisam de uma malha com triângulos"); return; }
+        if (busy) return;
+        busy = true;
+        progress.setVisibility(View.VISIBLE);
+        dimsText.setText("Detectando furos, pinos e raios...");
+        worker.execute(() -> {
+            AutoDims.Result r = null;
+            String err = null;
+            try {
+                if (topoMesh != m) {
+                    topo = new Fit.Topology(m);
+                    topoMesh = m;
+                }
+                r = AutoDims.compute(m, topo, null);
+            } catch (OutOfMemoryError e) {
+                err = "Memória insuficiente para esta malha.";
+            } catch (Exception e) {
+                err = e.toString();
+            }
+            final AutoDims.Result fr = r;
+            final String fe = err;
+            runOnUiThread(() -> {
+                busy = false;
+                progress.setVisibility(View.GONE);
+                if (m != current) return;
+                if (fe != null) { toast(fe); refreshDims(); return; }
+                dimsRes = fr;
+                refreshDims();
+            });
+        });
+    }
+
+    private void refreshDims() {
+        if (dimsText == null) return;
+        if (dimsRes == null) {
+            dimsText.setText("Mede o diâmetro de furos e pinos, raios, comprimentos e a distância entre eixos paralelos. Funciona melhor com a malha alinhada. O resultado entra no relatório em PDF.");
+            return;
+        }
+        dimsText.setText(AutoDims.describe(dimsRes));
+    }
+
+    private void markDims() {
+        AutoDims.Result r = dimsRes;
+        if (r == null || r.features.isEmpty()) { toast("Detecte as cotas primeiro"); return; }
+        for (int i = 0; i < r.features.size(); i++) {
+            AutoDims.Feature f = r.features.get(i);
+            String t = AutoDims.label(r, i) + (f.kind == AutoDims.ARC ? " R " + f2(f.radius) : " Ø " + f2(f.diameter()));
+            notes.add(new NotesView.Note(f.center.clone(), t));
+        }
+        notesView.setNotes(notes);
+        refreshNotes();
+        glView.requestRender();
+        toast("Cotas marcadas como notas");
+    }
+
+    // ---------------------------------------------------------------- Projetos
+
+    private void saveProjectDialog() {
+        final Mesh m = current;
+        if (m == null) { toast("Abra um arquivo primeiro"); return; }
+        android.content.SharedPreferences sp = getSharedPreferences("relatorio", MODE_PRIVATE);
+        String cli = sp.getString("cliente", ""), pec = sp.getString("peca", "");
+        String def = (cli + " " + pec).trim();
+        if (def.isEmpty()) {
+            def = m.name;
+            int dot = def.lastIndexOf('.');
+            if (dot > 0) def = def.substring(0, dot);
+        }
+        final android.widget.EditText e = new android.widget.EditText(this);
+        e.setSingleLine(true);
+        e.setText(def);
+        e.setSelection(def.length());
+        LinearLayout l = new LinearLayout(this);
+        l.setPadding(dp(20), dp(8), dp(20), 0);
+        l.addView(e, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Nome do projeto")
+                .setView(l)
+                .setPositiveButton("Salvar", (d, w) -> {
+                    String n = e.getText().toString().trim();
+                    saveProject(n.isEmpty() ? "Projeto" : n);
+                })
+                .setNegativeButton("Cancelar", null)
+                .show();
+    }
+
+    private void saveProject(final String name) {
+        final Mesh m = current;
+        if (m == null || busy) return;
+        final Mesh ref = refMesh;
+        final org.json.JSONObject meta = projectJson(name, m);
+        busy = true;
+        progress.setVisibility(View.VISIBLE);
+        final String id = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
+        glView.renderer.capture(bmp -> worker.execute(() -> {
+            String err = null;
+            try {
+                File dir = ProjectStore.newDir(this, id);
+                try (OutputStream os = new java.io.BufferedOutputStream(new FileOutputStream(new File(dir, ProjectStore.MESH)))) {
+                    Exporter.writePly(m, os);
+                }
+                if (ref != null) {
+                    try (OutputStream os = new java.io.BufferedOutputStream(new FileOutputStream(new File(dir, ProjectStore.REF)))) {
+                        Exporter.writePly(ref, os);
+                    }
+                }
+                float f = Math.min(1f, 360f / Math.max(bmp.getWidth(), bmp.getHeight()));
+                Bitmap th = f < 1f ? Bitmap.createScaledBitmap(bmp, Math.round(bmp.getWidth() * f), Math.round(bmp.getHeight() * f), true) : bmp;
+                try (OutputStream os = new FileOutputStream(new File(dir, ProjectStore.THUMB))) {
+                    th.compress(Bitmap.CompressFormat.PNG, 90, os);
+                }
+                ProjectStore.writeText(new File(dir, ProjectStore.META), meta.toString());
+            } catch (OutOfMemoryError e) {
+                err = "Memória insuficiente";
+            } catch (Exception e) {
+                err = e.getMessage() != null ? e.getMessage() : e.toString();
+            }
+            final String fe = err;
+            runOnUiThread(() -> {
+                busy = false;
+                progress.setVisibility(View.GONE);
+                if (fe != null) {
+                    ProjectStore.Info bad = new ProjectStore.Info();
+                    bad.dir = new File(ProjectStore.root(this), id);
+                    ProjectStore.delete(bad);
+                    toast("Erro ao salvar o projeto: " + fe);
+                    return;
+                }
+                toast("Projeto salvo: " + name);
+                refreshProjects();
+            });
+        }));
+        glView.requestRender();
+    }
+
+    private org.json.JSONObject projectJson(String name, Mesh m) {
+        org.json.JSONObject o = new org.json.JSONObject();
+        try {
+            o.put("name", name);
+            o.put("saved", System.currentTimeMillis());
+            o.put("meshName", m.name);
+            if (refMesh != null) o.put("refName", refMesh.name);
+            org.json.JSONArray ns = new org.json.JSONArray();
+            for (NotesView.Note n : notes) {
+                org.json.JSONObject j = new org.json.JSONObject();
+                j.put("x", n.p[0]).put("y", n.p[1]).put("z", n.p[2]).put("t", n.text);
+                ns.put(j);
+            }
+            o.put("notes", ns);
+            org.json.JSONArray ri = new org.json.JSONArray();
+            for (String r : reportItems) ri.put(r);
+            o.put("items", ri);
+            android.content.SharedPreferences sp = getSharedPreferences("relatorio", MODE_PRIVATE);
+            org.json.JSONObject rp = new org.json.JSONObject();
+            for (String[] f : REPORT_FIELDS) rp.put(f[0], sp.getString(f[0], ""));
+            o.put("report", rp);
+            o.put("material", material);
+            o.put("tolIdx", tolIdx);
+            o.put("thickIdx", thickIdx);
+        } catch (org.json.JSONException ignored) {
+        }
+        return o;
+    }
+
+    private void loadProject(ProjectStore.Info info) {
+        if (busy) return;
+        try {
+            pendingProject = new org.json.JSONObject(ProjectStore.readText(info.meta()));
+            pendingProjectDir = info.dir;
+        } catch (Exception e) {
+            toast("Projeto corrompido: " + e.getMessage());
+            return;
+        }
+        if (tool == TOOL_OPEN) selectTool(TOOL_OPEN);
+        load(Uri.fromFile(info.mesh()));
+    }
+
+    /** Restaura notas, itens do relatório, dados do cliente e a referência CAD depois que a malha do projeto carregou. */
+    private void applyProject(Mesh m) {
+        org.json.JSONObject p = pendingProject;
+        File dir = pendingProjectDir;
+        pendingProject = null;
+        pendingProjectDir = null;
+        if (p == null) return;
+        m.name = p.optString("name", m.name);
+        notes.clear();
+        org.json.JSONArray ns = p.optJSONArray("notes");
+        if (ns != null) {
+            for (int i = 0; i < ns.length(); i++) {
+                org.json.JSONObject j = ns.optJSONObject(i);
+                if (j == null) continue;
+                notes.add(new NotesView.Note(new double[]{j.optDouble("x"), j.optDouble("y"), j.optDouble("z")}, j.optString("t")));
+            }
+        }
+        notesView.setNotes(notes);
+        refreshNotes();
+        reportItems.clear();
+        org.json.JSONArray ri = p.optJSONArray("items");
+        if (ri != null) for (int i = 0; i < ri.length(); i++) reportItems.add(ri.optString(i));
+        refreshItemsBtn();
+        org.json.JSONObject rp = p.optJSONObject("report");
+        if (rp != null) {
+            android.content.SharedPreferences.Editor ed = getSharedPreferences("relatorio", MODE_PRIVATE).edit();
+            for (String[] f : REPORT_FIELDS) ed.putString(f[0], rp.optString(f[0], ""));
+            ed.putBoolean("definido", true).apply();
+        }
+        material = Math.max(0, Math.min(MAT_NAMES.length - 1, p.optInt("material", material)));
+        if (materialBtn != null) materialBtn.setText("Material: " + MAT_NAMES[material]);
+        tolIdx = Math.max(0, Math.min(TOLS.length - 1, p.optInt("tolIdx", tolIdx)));
+        thickIdx = Math.max(0, Math.min(THICK_MIN.length - 1, p.optInt("thickIdx", thickIdx)));
+        if (thickMinBtn != null) thickMinBtn.setText("Mín. " + f2(THICK_MIN[thickIdx]) + " mm");
+        updateInfo("Projeto aberto");
+        glView.requestRender();
+        File ref = new File(dir, ProjectStore.REF);
+        if (ref.isFile()) loadReference(Uri.fromFile(ref), p.optString("refName", "referência"));
+    }
+
+    private void refreshProjects() {
+        if (projectList == null) return;
+        projectList.removeAllViews();
+        List<ProjectStore.Info> list = ProjectStore.list(this);
+        if (list.isEmpty()) {
+            TextView t = text();
+            t.setText("Nenhum projeto salvo. Use Salvar > Salvar projeto.");
+            projectList.addView(t);
+            return;
+        }
+        SimpleDateFormat fmt = new SimpleDateFormat("dd/MM/yyyy HH:mm", BR);
+        for (final ProjectStore.Info info : list) {
+            LinearLayout r = new LinearLayout(this);
+            r.setOrientation(LinearLayout.HORIZONTAL);
+            r.setGravity(Gravity.CENTER_VERTICAL);
+            r.setPadding(0, dp(3), 0, dp(3));
+            android.widget.ImageView iv = new android.widget.ImageView(this);
+            iv.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+            iv.setBackgroundColor(0xFF12161C);
+            if (info.thumb().isFile()) {
+                Bitmap th = android.graphics.BitmapFactory.decodeFile(info.thumb().getAbsolutePath());
+                if (th != null) iv.setImageBitmap(th);
+            }
+            r.addView(iv, new LinearLayout.LayoutParams(dp(64), dp(48)));
+            TextView tv = text();
+            tv.setText(info.name + "\n" + fmt.format(new Date(info.saved)));
+            tv.setPadding(dp(10), 0, dp(6), 0);
+            tv.setOnClickListener(v -> loadProject(info));
+            iv.setOnClickListener(v -> loadProject(info));
+            r.addView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            r.addView(btn("Abrir", v -> loadProject(info)), new LinearLayout.LayoutParams(dp(70), dp(40)));
+            r.addView(btn("Apagar", v -> new android.app.AlertDialog.Builder(this)
+                    .setTitle("Apagar projeto?")
+                    .setMessage(info.name)
+                    .setPositiveButton("Apagar", (d, w) -> { ProjectStore.delete(info); refreshProjects(); })
+                    .setNegativeButton("Cancelar", null)
+                    .show()), new LinearLayout.LayoutParams(dp(76), dp(40)));
+            projectList.addView(r);
+        }
+    }
+
     // ---------------------------------------------------------------- Realidade aumentada
 
     private void openAr() {
@@ -2476,6 +2792,8 @@ public class MainActivity extends Activity {
             refreshItemsBtn();
         });
         p.addView(row(btn("Dados do relatório", v -> showReportDialog(null)), itemsBtn));
+        p.addView(label("Projeto (reabre tudo como está agora):"));
+        p.addView(row(btn("Salvar projeto...", v -> saveProjectDialog())));
         return p;
     }
 

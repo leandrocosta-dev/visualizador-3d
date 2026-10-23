@@ -54,3 +54,9 @@ Na realidade aumentada a peça recebe luz fixa no mundo (ambiente, difusa, brilh
 
 ## 7.2: AR com qualidade e escala
 Antisserrilhado 4x, profundidade de 24 bits e planos de corte mais justos (fim do serrilhado e da cintilação), malha completa até 4 milhões de triângulos, pinça para ampliar/reduzir e botões -, 1:1 real e +.
+
+## 8.0: cotas automáticas, projetos, relatório completo e foto em AR
+- **Cotas automáticas** (Análise > Detectar cotas): dimensões gerais, furos (F), pinos (P), raios (R), comprimentos, eixos, centros e distância entre eixos paralelos. Pode marcar tudo como notas e entra no PDF.
+- **Relatório**: campos de projeto/proposta, contato do cliente, ART, parecer técnico, contato da MoviAI no rodapé e linha de assinatura com nome, ART e data.
+- **Projetos** (Salvar > Salvar projeto, Abrir > Projetos salvos): malha alinhada, referência CAD, notas, itens do relatório, dados do cliente e miniatura.
+- **Foto em AR**: botão Foto na tela de realidade aumentada, com legenda de escala e dimensões.
